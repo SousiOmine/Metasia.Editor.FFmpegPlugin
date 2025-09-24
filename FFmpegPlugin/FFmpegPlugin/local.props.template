@@ -1,0 +1,5 @@
+<Project>
+    <PropertyGroup>
+        <MetasiaApplicationPath>your_path_to_application_here</MetasiaApplicationPath>
+    </PropertyGroup>
+</Project>
