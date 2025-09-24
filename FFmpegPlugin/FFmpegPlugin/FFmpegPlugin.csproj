@@ -4,6 +4,7 @@
     <TargetFramework>net9.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
   <Import Project="local.props" Condition="Exists('local.props')"/>
@@ -12,6 +13,15 @@
     <Reference Include="Metasia.Editor.Plugin">
       <HintPath>$(MetasiaApplicationPath)\Metasia.Editor.Plugin.dll</HintPath>
     </Reference>
+    <Reference Include="Metasia.Core">
+      <HintPath>$(MetasiaApplicationPath)\Metasia.Core.dll</HintPath>
+    </Reference>
+
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FFMpegCore" Version="5.2.0" />
+    <PackageReference Include="SkiaSharp" Version="3.119.1" />
   </ItemGroup>
 
 </Project>
