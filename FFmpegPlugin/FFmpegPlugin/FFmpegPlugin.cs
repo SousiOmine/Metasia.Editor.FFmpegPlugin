@@ -1,5 +1,7 @@
-﻿using System.Reflection;
+using System.Drawing;
+using System.Reflection;
 using FFMpegCore;
+using FFMpegCore.Extensions.SkiaSharp;
 using FFmpegPlugin.FFmpeg;
 using Metasia.Core.Media;
 using Metasia.Editor.Plugin;
@@ -23,8 +25,8 @@ public class FFmpegPlugin : IMediaInputPlugin
     
     public void Initialize()
     {
-        string? pluginDirectory = Path.GetDirectoryName(Environment.GetCommandLineArgs()[0]);
-        GlobalFFOptions.Configure(new FFOptions { BinaryFolder = pluginDirectory + "\\ffmpeg"});
+        string? pluginDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+        GlobalFFOptions.Configure(new FFOptions { BinaryFolder = Path.Combine(pluginDirectory!) });
         Console.WriteLine("Hello! from FFmpeg Plugin!");
     }
 
@@ -35,13 +37,15 @@ public class FFmpegPlugin : IMediaInputPlugin
 
     public VideoFileAccessorResult GetBitmap(MediaPath path, TimeSpan time, string? projectDir)
     {
-        string targetPath = MediaPath.GetFullPath(path, "");
-        //var bitmap = FFMpeg.Snapshot(input:targetPath, captureTime:(TimeSpan)time);
-        return new VideoFileAccessorResult() { IsSuccessful = false };
+        string targetPath = MediaPath.GetFullPath(path, projectDir);
+        var bitmap = FFMpegImage.Snapshot(targetPath, captureTime:time);
+        return new VideoFileAccessorResult() { IsSuccessful = true, Bitmap = bitmap };
     }
 
     public VideoFileAccessorResult GetBitmap(MediaPath path, int frame, string? projectDir)
     {
+        string targetPath = MediaPath.GetFullPath(path, projectDir);
+        //var bitmap = FFMpeg.Snapshot(input:targetPath, frame)
         return new VideoFileAccessorResult() { IsSuccessful = false };
     }
 }
