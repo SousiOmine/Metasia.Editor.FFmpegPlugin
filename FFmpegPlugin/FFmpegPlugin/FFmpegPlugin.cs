@@ -2,7 +2,6 @@ using System.Drawing;
 using System.Reflection;
 using FFMpegCore;
 using FFMpegCore.Extensions.SkiaSharp;
-using FFmpegPlugin.FFmpeg;
 using Metasia.Core.Media;
 using Metasia.Editor.Plugin;
 
