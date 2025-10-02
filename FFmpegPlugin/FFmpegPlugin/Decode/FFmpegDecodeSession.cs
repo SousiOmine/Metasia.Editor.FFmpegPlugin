@@ -1,8 +1,9 @@
 using System.Runtime.CompilerServices;
-using System.Threading.Channels;
 using FFMpegCore;
+using FFMpegCore.Enums;
 using FFMpegCore.Pipes;
 using SkiaSharp;
+using Channel = System.Threading.Channels.Channel;
 
 namespace FFmpegPlugin.Decode;
 
@@ -99,6 +100,8 @@ public class FFmpegDecodeSession : IDisposable
                         new StreamPipeSink(sinkStream),
                         opt => opt
                             .ForceFormat("rawvideo")
+                            .WithHardwareAcceleration()
+                            .WithSpeedPreset(Speed.UltraFast)
                             .WithCustomArgument("-pix_fmt bgra")
                             .WithCustomArgument($"-vf fps={frameRate}")
                             .WithCustomArgument("-an -sn -dn")
