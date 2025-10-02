@@ -10,6 +10,7 @@ public class FrameItem
     
     public (bool, TimeSpan) IsNearTime(TimeSpan time, TimeSpan threshold)
     {
-        return (false, TimeSpan.Zero);
+        var difference = Math.Abs((Time - time).TotalSeconds);
+        return (difference <= threshold.TotalSeconds, TimeSpan.FromSeconds(difference));
     }
 }
