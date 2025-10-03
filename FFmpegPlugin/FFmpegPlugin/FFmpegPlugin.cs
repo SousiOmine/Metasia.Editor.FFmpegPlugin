@@ -26,14 +26,14 @@ public class FFmpegPlugin : IMediaInputPlugin, IDisposable
         IEditorPlugin.SupportEnvironment.Linux_x64,
     };
     
-    /*public void Initialize()
+    public void Initialize()
     {
         string? pluginDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
         GlobalFFOptions.Configure(new FFOptions { BinaryFolder = Path.Combine(pluginDirectory!) });
         Console.WriteLine("Hello! from FFmpeg Plugin!");
     }
 
-    public ImageFileAccessorResult GetBitmap(MediaPath path)
+    /*public ImageFileAccessorResult GetBitmap(MediaPath path)
     {
         return new ImageFileAccessorResult() { IsSuccessful = false };
     }
