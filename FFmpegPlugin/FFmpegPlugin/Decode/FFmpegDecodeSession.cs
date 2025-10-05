@@ -1,4 +1,6 @@
+using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using FFMpegCore;
 using FFMpegCore.Enums;
 using FFMpegCore.Pipes;
@@ -40,8 +42,7 @@ public class FFmpegDecodeSession : IDisposable
     /// </summary>
     public async Task<FrameItem?> GetSingleFrameAsync(TimeSpan time, CancellationToken cancellationToken = default)
     {
-        if (_disposed)
-            throw new ObjectDisposedException(nameof(FFmpegDecodeSession));
+        ObjectDisposedException.ThrowIf(_disposed, nameof(FFmpegDecodeSession));
 
         try
         {
@@ -51,13 +52,8 @@ public class FFmpegDecodeSession : IDisposable
 
             // BGRAフォーマットのバイト配列からSKBitmapを作成
             var bitmap = new SKBitmap(_width, _height, SKColorType.Bgra8888, SKAlphaType.Premul);
-            unsafe
-            {
-                fixed (byte* ptr = frameData)
-                {
-                    bitmap.SetPixels((IntPtr)ptr);
-                }
-            }
+            // GetPixels()で取得したネイティブバッファにコピーして、ポインタのライフタイム問題を回避
+            Marshal.Copy(frameData, 0, bitmap.GetPixels(), frameData.Length);
 
             return new FrameItem
             {
@@ -82,8 +78,7 @@ public class FFmpegDecodeSession : IDisposable
         double frameRate,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        if (_disposed)
-            throw new ObjectDisposedException(nameof(FFmpegDecodeSession));
+        ObjectDisposedException.ThrowIf(_disposed, nameof(FFmpegDecodeSession));
 
         var channel = Channel.CreateUnbounded<byte[]>();
 
@@ -94,19 +89,24 @@ public class FFmpegDecodeSession : IDisposable
         {
             try
             {
+                // 正確なフレーム取得のため、入力前シークと-accurate_seekを組み合わせ
+                //var startTimeStr = startTime.TotalSeconds.ToString("F6", CultureInfo.InvariantCulture);
+                var maxLengthStr = maxLength.TotalSeconds.ToString("F6", CultureInfo.InvariantCulture);
+                var frameRateStr = frameRate.ToString("F3", CultureInfo.InvariantCulture);
+                
                 await FFMpegArguments
-                    .FromFileInput(_videoPath)
+                    .FromFileInput(_videoPath, true, opt => opt
+                        .Seek(startTime)
+                    )
                     .OutputToPipe(
                         new StreamPipeSink(sinkStream),
                         opt => opt
                             .ForceFormat("rawvideo")
-                            .WithHardwareAcceleration()
                             .WithSpeedPreset(Speed.UltraFast)
                             .WithCustomArgument("-pix_fmt bgra")
-                            .WithCustomArgument($"-vf fps={frameRate}")
+                            .WithCustomArgument($"-vf fps={frameRateStr}")
                             .WithCustomArgument("-an -sn -dn")
-                            .WithCustomArgument($"-ss {startTime.TotalSeconds}")
-                            .WithCustomArgument($"-t {maxLength.TotalSeconds}")
+                            .WithCustomArgument($"-t {maxLengthStr}")
                     )
                     .CancellableThrough(cancellationToken)
                     .ProcessAsynchronously();
@@ -131,13 +131,8 @@ public class FFmpegDecodeSession : IDisposable
 
             // BGRAフォーマットのバイト配列からSKBitmapを作成
             var bitmap = new SKBitmap(_width, _height, SKColorType.Bgra8888, SKAlphaType.Premul);
-            unsafe
-            {
-                fixed (byte* ptr = frameData)
-                {
-                    bitmap.SetPixels((IntPtr)ptr);
-                }
-            }
+            // GetPixels()で取得したネイティブバッファにコピーして、ポインタのライフタイム問題を回避
+            Marshal.Copy(frameData, 0, bitmap.GetPixels(), frameData.Length);
 
             // フレームの時間を計算
             TimeSpan frameTime = startTime + TimeSpan.FromSeconds(frameIndex / frameRate);
@@ -172,15 +167,20 @@ public class FFmpegDecodeSession : IDisposable
 
         try
         {
+            // 正確なシークのため、-ssは入力後に配置
+            var timeStr = time.TotalSeconds.ToString("F6", CultureInfo.InvariantCulture);
+            
             await FFMpegArguments
-                .FromFileInput(_videoPath)
+                .FromFileInput(_videoPath, false, opt => opt
+                    .WithCustomArgument("-accurate_seek")  // 正確なシークを有効化
+                )
                 .OutputToPipe(
                     new StreamPipeSink(memoryStream),
                     opt => opt
                         .ForceFormat("rawvideo")
                         .WithCustomArgument("-pix_fmt bgra")
+                        .WithCustomArgument($"-ss {timeStr}")  // 出力前にシーク（精度高い）
                         .WithCustomArgument("-vframes 1")
-                        .WithCustomArgument($"-ss {time.TotalSeconds}")
                         .WithCustomArgument("-an -sn -dn")
                 )
                 .CancellableThrough(cancellationToken)

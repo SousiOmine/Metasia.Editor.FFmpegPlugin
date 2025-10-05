@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using FFmpegPlugin.Decode;
 
 namespace FFmpegPlugin.Cache;
@@ -7,7 +7,7 @@ public class FrameCache : IDisposable
 {
     private readonly int _maxCacheSize;
     private readonly ConcurrentDictionary<string, LinkedList<FrameCacheItem>> _cacheByPath;
-    private readonly object _lockObject = new();
+    private readonly Lock _lockObject = new();
 
     public FrameCache(int maxCacheSize = 1000)
     {
@@ -98,6 +98,8 @@ public class FrameCache : IDisposable
                         {
                             _cacheByPath.TryRemove(item.Frame.Path, out _);
                         }
+                        // エビクション時にSKBitmapを適切に破棄
+                        item.Frame.Dispose();
                     }
                 }
             }
@@ -106,6 +108,15 @@ public class FrameCache : IDisposable
 
     public void Dispose()
     {
+        // すべてのキャッシュされたFrameItemを破棄
+        foreach (var frames in _cacheByPath.Values)
+        {
+            foreach (var item in frames)
+            {
+                item.Frame.Dispose();
+            }
+        }
         _cacheByPath.Clear();
+        GC.SuppressFinalize(this);
     }
 }

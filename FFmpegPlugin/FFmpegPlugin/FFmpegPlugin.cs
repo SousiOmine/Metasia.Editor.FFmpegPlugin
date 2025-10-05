@@ -33,39 +33,6 @@ public class FFmpegPlugin : IMediaInputPlugin, IDisposable
         Console.WriteLine("Hello! from FFmpeg Plugin!");
     }
 
-    /*public ImageFileAccessorResult GetBitmap(MediaPath path)
-    {
-        return new ImageFileAccessorResult() { IsSuccessful = false };
-    }
-
-    /*
-    public VideoFileAccessorResult GetBitmap(MediaPath path, TimeSpan time, string? projectDir)
-    {
-        try
-        {
-            string targetPath = MediaPath.GetFullPath(path, projectDir);
-            Console.WriteLine($"GetBitmap呼び出し: {targetPath}, {time}");
-
-            // 同期的にフレームを取得
-            FrameItem frame = _frameProvider.GetFrame(targetPath, time);
-            var bitmap = frame.Bitmap;
-
-            return new VideoFileAccessorResult() { IsSuccessful = true, Bitmap = bitmap };
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"GetBitmapエラー: {ex.Message}");
-            return new VideoFileAccessorResult() { IsSuccessful = false };
-        }
-    }#1#
-
-    public VideoFileAccessorResult GetBitmap(MediaPath path, int frame, string? projectDir)
-    {
-        string targetPath = MediaPath.GetFullPath(path, projectDir);
-        // TODO: フレーム番号ベースの取得を実装
-        return new VideoFileAccessorResult() { IsSuccessful = false };
-    }*/
-
     public async Task<VideoFileAccessorResult> GetBitmapAsync(MediaPath path, TimeSpan time, string? projectDir)
     {
         try
@@ -77,7 +44,14 @@ public class FFmpegPlugin : IMediaInputPlugin, IDisposable
             FrameItem frame = await _frameProvider.GetFrameAsync(targetPath, time);
             var bitmap = frame.Bitmap;
 
-            return new VideoFileAccessorResult() { IsSuccessful = true, Bitmap = bitmap };
+            if (bitmap.Width > 0 && bitmap.Height > 0)
+            {
+                return new VideoFileAccessorResult() { IsSuccessful = true, Bitmap = bitmap };
+            }
+            else
+            {
+                return new VideoFileAccessorResult() { IsSuccessful = false };
+            }
         }
         catch (Exception ex)
         {
@@ -90,7 +64,6 @@ public class FFmpegPlugin : IMediaInputPlugin, IDisposable
     {
         throw new NotImplementedException();
     }
-
     public Task<VideoFileAccessorResult> GetBitmapAsync(MediaPath path, int frame, string? projectDir)
     {
         throw new NotImplementedException();
@@ -99,5 +72,6 @@ public class FFmpegPlugin : IMediaInputPlugin, IDisposable
     public void Dispose()
     {
         _frameProvider?.Dispose();
+        GC.SuppressFinalize(this);
     }
 }
