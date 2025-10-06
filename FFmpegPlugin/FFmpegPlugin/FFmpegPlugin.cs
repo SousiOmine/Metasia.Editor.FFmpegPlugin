@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Drawing;
 using System.Reflection;
 using FFMpegCore;
@@ -38,7 +39,7 @@ public class FFmpegPlugin : IMediaInputPlugin, IDisposable
         try
         {
             string targetPath = MediaPath.GetFullPath(path, projectDir);
-            Console.WriteLine($"GetBitmapAsync呼び出し: {targetPath}, {time}");
+            Debug.WriteLine($"GetBitmapAsync呼び出し: {targetPath}, {time}");
 
             // 非同期的にフレームを取得
             FrameItem frame = await _frameProvider.GetFrameAsync(targetPath, time);
@@ -55,7 +56,7 @@ public class FFmpegPlugin : IMediaInputPlugin, IDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"GetBitmapAsyncエラー: {ex.Message}");
+            Debug.WriteLine($"GetBitmapAsyncエラー: {ex.Message}");
             return new VideoFileAccessorResult() { IsSuccessful = false };
         }
     }

@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.IO;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -23,6 +25,10 @@ public class FFmpegDecodeSession : IDisposable
     private readonly IMediaAnalysis _mediaInfo;
     private bool _disposed = false;
 
+    public double Framerate => _framerate;
+    public int Width => _width;
+    public int Height => _height;
+
     public FFmpegDecodeSession(string videoPath)
     {
         _videoPath = videoPath;
@@ -44,13 +50,45 @@ public class FFmpegDecodeSession : IDisposable
     /// </summary>
     public async Task<FrameItem?> GetSingleFrameAsync(TimeSpan time, CancellationToken cancellationToken = default)
     {
+        if (time < TimeSpan.Zero)
+            time = TimeSpan.Zero;
         ObjectDisposedException.ThrowIf(_disposed, nameof(FFmpegDecodeSession));
+
+        using var memoryStream = new MemoryStream();
 
         try
         {
-            var frameData = await ExtractSingleFrameAsync(time, cancellationToken);
-            if (frameData == null)
+            // 高速化のため、-ssを入力前に配置（キーフレームシーク）
+            // 精度とのトレードオフだが、キャッシュ許容範囲内であれば問題ない
+            // var seekTime = time > TimeSpan.FromSeconds(1) 
+            //     ? time - TimeSpan.FromSeconds(1) 
+            //     : TimeSpan.Zero;
+            
+            await FFMpegArguments
+                .FromFileInput(_videoPath, true, opt => opt
+                    //.Seek(seekTime)
+                    .Seek(time)
+                )
+                .OutputToPipe(
+                    new StreamPipeSink(memoryStream),
+                    opt => opt
+                        .ForceFormat("rawvideo")
+                        .WithSpeedPreset(Speed.UltraFast)
+                        .WithCustomArgument("-pix_fmt bgra")
+                        .WithCustomArgument("-an -sn -dn")
+                        .WithCustomArgument("-frames:v 1")
+                        //.Seek(time) // 入力後にも正確なシーク
+                )
+                .CancellableThrough(cancellationToken)
+                .ProcessAsynchronously();
+
+            var frameData = memoryStream.ToArray();
+            // フレームデータのサイズが正しいかチェック
+            if (frameData.Length != _frameSize)
+            {
+                Debug.WriteLine($"フレームサイズが一致しません: 期待={_frameSize}, 実際={frameData.Length}");
                 return null;
+            }
 
             // BGRAフォーマットのバイト配列からSKBitmapを作成
             var bitmap = new SKBitmap(_width, _height, SKColorType.Bgra8888, SKAlphaType.Premul);
@@ -66,7 +104,7 @@ public class FFmpegDecodeSession : IDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"フレーム取得エラー: {_videoPath}, {time}, {ex.Message}");
+            Debug.WriteLine($"フレーム取得エラー: {_videoPath}, {time}, {ex.Message}");
             return null;
         }
     }
@@ -79,6 +117,10 @@ public class FFmpegDecodeSession : IDisposable
         TimeSpan maxLength,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        if (startTime < TimeSpan.Zero)
+            startTime = TimeSpan.Zero;
+        if (maxLength < TimeSpan.Zero)
+            maxLength = TimeSpan.Zero;
         ObjectDisposedException.ThrowIf(_disposed, nameof(FFmpegDecodeSession));
 
         var channel = Channel.CreateUnbounded<byte[]>();
@@ -90,13 +132,12 @@ public class FFmpegDecodeSession : IDisposable
         {
             try
             {
-                // 正確なフレーム取得のため、入力前シークと-accurate_seekを組み合わせ
-                //var startTimeStr = startTime.TotalSeconds.ToString("F6", CultureInfo.InvariantCulture);
                 var maxLengthStr = maxLength.TotalSeconds.ToString("F6", CultureInfo.InvariantCulture);
                 var frameRateStr = _framerate.ToString("F3", CultureInfo.InvariantCulture);
                 
                 await FFMpegArguments
                     .FromFileInput(_videoPath, true, opt => opt
+                        //.Seek(startTime > TimeSpan.FromSeconds(1) ? startTime - TimeSpan.FromSeconds(1) : TimeSpan.Zero)
                         .Seek(startTime)
                     )
                     .OutputToPipe(
@@ -105,16 +146,16 @@ public class FFmpegDecodeSession : IDisposable
                             .ForceFormat("rawvideo")
                             .WithSpeedPreset(Speed.UltraFast)
                             .WithCustomArgument("-pix_fmt bgra")
-                            .WithCustomArgument($"-vf fps={frameRateStr}")
                             .WithCustomArgument("-an -sn -dn")
                             .WithCustomArgument($"-t {maxLengthStr}")
+                            //.Seek(startTime)
                     )
                     .CancellableThrough(cancellationToken)
                     .ProcessAsynchronously();
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"FFmpeg処理エラー: {ex.Message}");
+                Debug.WriteLine($"FFmpeg処理エラー: {ex.Message}");
                 channel.Writer.Complete(ex);
             }
             finally
@@ -135,8 +176,13 @@ public class FFmpegDecodeSession : IDisposable
             // GetPixels()で取得したネイティブバッファにコピーして、ポインタのライフタイム問題を回避
             Marshal.Copy(frameData, 0, bitmap.GetPixels(), frameData.Length);
 
-            // フレームの時間を計算
-            TimeSpan frameTime = startTime + TimeSpan.FromSeconds(frameIndex / _framerate);
+            // フレームの時間を計算（TimeSpanオーバーフロー防止）
+            double frameTimeInSeconds = startTime.TotalSeconds + (frameIndex / _framerate);
+            if (frameTimeInSeconds > TimeSpan.MaxValue.TotalSeconds)
+            {
+                frameTimeInSeconds = TimeSpan.MaxValue.TotalSeconds;
+            }
+            TimeSpan frameTime = TimeSpan.FromSeconds(frameTimeInSeconds);
 
             yield return new FrameItem
             {
@@ -156,52 +202,6 @@ public class FFmpegDecodeSession : IDisposable
         catch (OperationCanceledException)
         {
             // キャンセルされた場合は無視
-        }
-    }
-
-    /// <summary>
-    /// 単一フレームをFFmpegで抽出する
-    /// </summary>
-    private async Task<byte[]?> ExtractSingleFrameAsync(TimeSpan time, CancellationToken cancellationToken)
-    {
-        using var memoryStream = new MemoryStream();
-
-        try
-        {
-            // 正確なシークのため、-ssは入力後に配置
-            var timeStr = time.TotalSeconds.ToString("F6", CultureInfo.InvariantCulture);
-            
-            await FFMpegArguments
-                .FromFileInput(_videoPath, false, opt => opt
-                    .WithCustomArgument("-accurate_seek")  // 正確なシークを有効化
-                    .Seek(time)
-                )
-                .OutputToPipe(
-                    new StreamPipeSink(memoryStream),
-                    opt => opt
-                        .ForceFormat("rawvideo")
-                        .WithCustomArgument("-pix_fmt bgra")
-                        .WithCustomArgument("-an -sn -dn")
-                        .WithCustomArgument("-vsync 0")
-                )
-                .CancellableThrough(cancellationToken)
-                .ProcessAsynchronously();
-
-            var frameData = memoryStream.ToArray();
-
-            // フレームデータのサイズが正しいかチェック
-            if (frameData.Length != _frameSize)
-            {
-                Console.WriteLine($"フレームサイズが一致しません: 期待={_frameSize}, 実際={frameData.Length}");
-                return null;
-            }
-
-            return frameData;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"単一フレーム抽出エラー: {ex.Message}");
-            return null;
         }
     }
 
