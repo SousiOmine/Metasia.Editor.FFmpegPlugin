@@ -29,13 +29,14 @@ public class VideoSession : IDisposable
 
         try
         {
-            var frameTask = _decodeSession.DecodeAsync(time, TimeSpan.FromMilliseconds(50), 30);
+            var frameTask = _decodeSession.DecodeAsync(time, TimeSpan.FromMilliseconds(5000));
             await using var enumerator = frameTask.GetAsyncEnumerator();
             if(!await enumerator.MoveNextAsync())
             {
                 throw new InvalidOperationException("フレームが見つかりませんでした");
             }
             var first = enumerator.Current;
+            Debug.WriteLine($"デコード完了: 要求時刻={time}, 取得フレーム時刻={first.Time}, 差分={(first.Time - time).TotalMilliseconds}ms");
             _frameCache.Add(first);
 
             _ = Task.Run(async () =>

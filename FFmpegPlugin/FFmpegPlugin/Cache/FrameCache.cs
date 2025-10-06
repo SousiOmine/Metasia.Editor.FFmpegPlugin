@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using FFmpegPlugin.Decode;
 
 namespace FFmpegPlugin.Cache;
@@ -27,7 +28,7 @@ public class FrameCache : IDisposable
             LinkedListNode<FrameCacheItem>? bestMatchNode = null;
             double bestDistance = double.MaxValue;
 
-            while (node != null)
+            while (node is not null)
             {
                 var (isNear, distance) = node.Value.Frame.IsNearTime(time, seekTolerance);
                 if (isNear && distance.TotalSeconds < bestDistance)
@@ -48,6 +49,7 @@ public class FrameCache : IDisposable
                 bestMatch.LastUsedTime = DateTime.Now;
                 frames.Remove(bestMatchNode);
                 frames.AddFirst(bestMatchNode);
+                Debug.WriteLine($"キャッシュマッチ: 要求={time}, フレーム={bestMatch.Frame.Time}, 差分={bestDistance * 1000:F3}ms");
                 return bestMatch.Frame;
             }
         }

@@ -18,6 +18,7 @@ public class FFmpegDecodeSession : IDisposable
     private readonly int _width;
     private readonly int _height;
     private readonly int _frameSize;
+    private readonly double _framerate;
     private readonly string _ffmpegPath;
     private readonly IMediaAnalysis _mediaInfo;
     private bool _disposed = false;
@@ -32,6 +33,7 @@ public class FFmpegDecodeSession : IDisposable
 
         _width = _mediaInfo.VideoStreams[0].Width;
         _height = _mediaInfo.VideoStreams[0].Height;
+        _framerate = _mediaInfo.VideoStreams[0].FrameRate;
 
         _frameSize = _width * _height * 4;
         _ffmpegPath = Path.Combine(GlobalFFOptions.Current.BinaryFolder, "ffmpeg");
@@ -75,7 +77,6 @@ public class FFmpegDecodeSession : IDisposable
     public async IAsyncEnumerable<FrameItem> DecodeAsync(
         TimeSpan startTime,
         TimeSpan maxLength,
-        double frameRate,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, nameof(FFmpegDecodeSession));
@@ -92,7 +93,7 @@ public class FFmpegDecodeSession : IDisposable
                 // 正確なフレーム取得のため、入力前シークと-accurate_seekを組み合わせ
                 //var startTimeStr = startTime.TotalSeconds.ToString("F6", CultureInfo.InvariantCulture);
                 var maxLengthStr = maxLength.TotalSeconds.ToString("F6", CultureInfo.InvariantCulture);
-                var frameRateStr = frameRate.ToString("F3", CultureInfo.InvariantCulture);
+                var frameRateStr = _framerate.ToString("F3", CultureInfo.InvariantCulture);
                 
                 await FFMpegArguments
                     .FromFileInput(_videoPath, true, opt => opt
@@ -135,7 +136,7 @@ public class FFmpegDecodeSession : IDisposable
             Marshal.Copy(frameData, 0, bitmap.GetPixels(), frameData.Length);
 
             // フレームの時間を計算
-            TimeSpan frameTime = startTime + TimeSpan.FromSeconds(frameIndex / frameRate);
+            TimeSpan frameTime = startTime + TimeSpan.FromSeconds(frameIndex / _framerate);
 
             yield return new FrameItem
             {
@@ -173,15 +174,15 @@ public class FFmpegDecodeSession : IDisposable
             await FFMpegArguments
                 .FromFileInput(_videoPath, false, opt => opt
                     .WithCustomArgument("-accurate_seek")  // 正確なシークを有効化
+                    .Seek(time)
                 )
                 .OutputToPipe(
                     new StreamPipeSink(memoryStream),
                     opt => opt
                         .ForceFormat("rawvideo")
                         .WithCustomArgument("-pix_fmt bgra")
-                        .WithCustomArgument($"-ss {timeStr}")  // 出力前にシーク（精度高い）
-                        .WithCustomArgument("-vframes 1")
                         .WithCustomArgument("-an -sn -dn")
+                        .WithCustomArgument("-vsync 0")
                 )
                 .CancellableThrough(cancellationToken)
                 .ProcessAsynchronously();
