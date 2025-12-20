@@ -34,15 +34,14 @@ public class FFmpegPlugin : IMediaInputPlugin, IDisposable
         Console.WriteLine("Hello! from FFmpeg Plugin!");
     }
 
-    public async Task<VideoFileAccessorResult> GetBitmapAsync(MediaPath path, TimeSpan time, string? projectDir)
+    public async Task<VideoFileAccessorResult> GetBitmapAsync(string path, TimeSpan time)
     {
         try
         {
-            string targetPath = MediaPath.GetFullPath(path, projectDir);
-            Debug.WriteLine($"GetBitmapAsync呼び出し: {targetPath}, {time}");
+            Debug.WriteLine($"GetBitmapAsync呼び出し: {path}, {time}");
 
             // 非同期的にフレームを取得
-            FrameItem frame = await _frameProvider.GetFrameAsync(targetPath, time);
+            FrameItem frame = await _frameProvider.GetFrameAsync(path, time);
             var bitmap = frame.Bitmap;
 
             if (bitmap.Width > 0 && bitmap.Height > 0)
@@ -61,11 +60,11 @@ public class FFmpegPlugin : IMediaInputPlugin, IDisposable
         }
     }
 
-    public Task<ImageFileAccessorResult> GetBitmapAsync(MediaPath path)
+    public Task<ImageFileAccessorResult> GetBitmapAsync(string path)
     {
         throw new NotImplementedException();
     }
-    public Task<VideoFileAccessorResult> GetBitmapAsync(MediaPath path, int frame, string? projectDir)
+    public Task<VideoFileAccessorResult> GetBitmapAsync(string path, int frame)
     {
         throw new NotImplementedException();
     }
