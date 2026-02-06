@@ -109,6 +109,7 @@ public class FFmpegDecodeSession : IDisposable
         {
             SingleReader = true,
             SingleWriter = true,
+            AllowSynchronousContinuations = true,
             FullMode = BoundedChannelFullMode.Wait
         });
 
@@ -121,44 +122,7 @@ public class FFmpegDecodeSession : IDisposable
             channel.Writer,
             decodeToken);
 
-        // FFmpegプロセスをバックグラウンドで開始
-        var ffmpegTask = Task.Run(async () =>
-        {
-            try
-            {
-                var maxLengthStr = maxLength.TotalSeconds.ToString("F6", CultureInfo.InvariantCulture);
-                
-                await FFMpegArguments
-                    .FromFileInput(_videoPath, true, opt => opt
-                        .Seek(startTime)
-                    )
-                    .OutputToPipe(
-                        new StreamPipeSink(sinkStream),
-                        opt => opt
-                            .ForceFormat("rawvideo")
-                            .WithSpeedPreset(Speed.UltraFast)
-                            .WithCustomArgument("-pix_fmt bgra")
-                            .WithCustomArgument("-an -sn -dn")
-                            .WithCustomArgument($"-t {maxLengthStr}")
-                    )
-                    .CancellableThrough(decodeToken)
-                    .ProcessAsynchronously();
-            }
-            catch (OperationCanceledException) when (decodeToken.IsCancellationRequested)
-            {
-                // linked token 経由の停止は正常系
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"FFmpeg処理エラー: {ex.Message}");
-                channel.Writer.TryComplete(ex);
-                return;
-            }
-            finally
-            {
-                channel.Writer.TryComplete();
-            }
-        }, CancellationToken.None);
+        var ffmpegTask = RunDecodeProcessAsync(startTime, maxLength, sinkStream, channel.Writer, decodeToken);
 
         try
         {
@@ -193,6 +157,49 @@ public class FFmpegDecodeSession : IDisposable
         if (!_disposed)
         {
             _disposed = true;
+        }
+    }
+
+    private async Task RunDecodeProcessAsync(
+        TimeSpan startTime,
+        TimeSpan maxLength,
+        FrameChunkStream sinkStream,
+        ChannelWriter<FrameItem> writer,
+        CancellationToken decodeToken)
+    {
+        try
+        {
+            var maxLengthStr = maxLength.TotalSeconds.ToString("F6", CultureInfo.InvariantCulture);
+
+            await FFMpegArguments
+                .FromFileInput(_videoPath, true, opt => opt
+                    .Seek(startTime)
+                )
+                .OutputToPipe(
+                    new StreamPipeSink(sinkStream),
+                    opt => opt
+                        .ForceFormat("rawvideo")
+                        .WithSpeedPreset(Speed.UltraFast)
+                        .WithCustomArgument("-pix_fmt bgra")
+                        .WithCustomArgument("-an -sn -dn")
+                        .WithCustomArgument($"-t {maxLengthStr}")
+                )
+                .CancellableThrough(decodeToken)
+                .ProcessAsynchronously();
+        }
+        catch (OperationCanceledException) when (decodeToken.IsCancellationRequested)
+        {
+            // linked token 経由の停止は正常系
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"FFmpeg処理エラー: {ex.Message}");
+            writer.TryComplete(ex);
+            return;
+        }
+        finally
+        {
+            writer.TryComplete();
         }
     }
 }

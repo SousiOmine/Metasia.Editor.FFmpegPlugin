@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using FFmpegPlugin.Decode;
 
 namespace FFmpegPlugin.Cache;
@@ -7,7 +6,7 @@ public sealed class FrameCache : IDisposable
 {
     private readonly int _maxCacheSize;
     private readonly long _quantizationTicks;
-    private readonly ConcurrentDictionary<long, FrameCacheItem> _frameCache = new();
+    private readonly Dictionary<long, FrameCacheItem> _frameCache = new();
     private readonly LinkedList<long> _lruList = new();
     private readonly Lock _lockObject = new();
 
@@ -30,7 +29,7 @@ public sealed class FrameCache : IDisposable
         lock (_lockObject)
         {
             FrameCacheItem? bestMatch = null;
-            var bestDistance = double.MaxValue;
+            var bestDistanceTicks = long.MaxValue;
 
             for (var quantizedTicks = minQuantized; quantizedTicks <= maxQuantized; quantizedTicks += _quantizationTicks)
             {
@@ -39,14 +38,14 @@ public sealed class FrameCache : IDisposable
                     continue;
                 }
 
-                var (isNear, distance) = cacheItem.Frame.IsNearTime(time, seekTolerance);
-                if (!isNear || distance.TotalSeconds >= bestDistance)
+                var (isNear, distanceTicks) = cacheItem.Frame.IsNearTimeTicks(targetTicks, toleranceTicks);
+                if (!isNear || distanceTicks >= bestDistanceTicks)
                 {
                     continue;
                 }
 
                 bestMatch = cacheItem;
-                bestDistance = distance.TotalSeconds;
+                bestDistanceTicks = distanceTicks;
             }
 
             if (bestMatch is null)
@@ -78,7 +77,7 @@ public sealed class FrameCache : IDisposable
                     continue;
                 }
 
-                var (isNear, _) = cacheItem.Frame.IsNearTime(time, tolerance);
+                var (isNear, _) = cacheItem.Frame.IsNearTimeTicks(targetTicks, toleranceTicks);
                 if (isNear)
                 {
                     return true;
@@ -110,7 +109,7 @@ public sealed class FrameCache : IDisposable
             {
                 var evictionKey = _lruList.Last.Value;
                 _lruList.RemoveLast();
-                if (_frameCache.TryRemove(evictionKey, out var removedItem))
+                if (_frameCache.Remove(evictionKey, out var removedItem))
                 {
                     removedItem.Frame.Dispose();
                 }

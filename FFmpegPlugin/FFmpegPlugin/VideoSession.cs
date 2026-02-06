@@ -5,7 +5,7 @@ namespace FFmpegPlugin;
 
 public sealed class VideoSession : IDisposable
 {
-    private static readonly TimeSpan MinForegroundWindow = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan MinForegroundWindow = TimeSpan.FromMilliseconds(80);
     private static readonly TimeSpan MinPrefetchWindow = TimeSpan.FromMilliseconds(900);
 
     public readonly string Path;
@@ -16,6 +16,7 @@ public sealed class VideoSession : IDisposable
     private readonly TimeSpan _frameDuration;
     private readonly TimeSpan _foregroundDecodeWindow;
     private readonly TimeSpan _prefetchWindow;
+    private readonly TimeSpan _prefetchStartLead;
     private readonly TimeSpan _sequentialDeltaThreshold;
 
     private readonly Lock _stateLock = new();
@@ -35,8 +36,9 @@ public sealed class VideoSession : IDisposable
             ? TimeSpan.FromSeconds(1.0 / _decodeSession.Framerate)
             : TimeSpan.FromMilliseconds(16.666);
         _seekTolerance = ResolveSeekTolerance(_frameDuration);
-        _foregroundDecodeWindow = Max(MinForegroundWindow, _frameDuration * 24);
+        _foregroundDecodeWindow = Max(MinForegroundWindow, _frameDuration * 8);
         _prefetchWindow = Max(MinPrefetchWindow, _frameDuration * 90);
+        _prefetchStartLead = Max(_frameDuration * 24, _foregroundDecodeWindow);
         _sequentialDeltaThreshold = _frameDuration * 6;
 
         _frameCache = new FrameCache(maxCacheSize, _frameDuration);
@@ -59,20 +61,25 @@ public sealed class VideoSession : IDisposable
             return cached;
         }
 
-        if (isSequential)
+        if (!isSequential)
         {
-            await DecodeRangeIntoCacheAsync(time, _foregroundDecodeWindow, _lifetimeCts.Token).ConfigureAwait(false);
-            if (TryGetCachedFrame(time, out cached))
-            {
-                UpdateRequestState(time, isSequential: true);
-                TriggerPrefetchIfNeeded(time, isSequential: true);
-                return cached;
-            }
+            UpdateRequestState(time, isSequential: false);
+            var seekFrame = await DecodeSingleFrameAndCacheAsync(time, _lifetimeCts.Token).ConfigureAwait(false);
+            TriggerPrefetchIfNeeded(time, isSequential: true);
+            return seekFrame;
+        }
+
+        await DecodeRangeIntoCacheAsync(time, _foregroundDecodeWindow, _lifetimeCts.Token).ConfigureAwait(false);
+        if (TryGetCachedFrame(time, out cached))
+        {
+            UpdateRequestState(time, isSequential: true);
+            TriggerPrefetchIfNeeded(time, isSequential: true);
+            return cached;
         }
 
         var singleFrame = await DecodeSingleFrameAndCacheAsync(time, _lifetimeCts.Token).ConfigureAwait(false);
-        UpdateRequestState(time, isSequential);
-        TriggerPrefetchIfNeeded(time, isSequential);
+        UpdateRequestState(time, isSequential: true);
+        TriggerPrefetchIfNeeded(time, isSequential: true);
         return singleFrame;
     }
 
@@ -196,7 +203,7 @@ public sealed class VideoSession : IDisposable
                 return;
             }
 
-            if (_prefetchedUntil != TimeSpan.MinValue && prefetchStart <= _prefetchedUntil - (_frameDuration * 2))
+            if (_prefetchedUntil != TimeSpan.MinValue && prefetchStart <= _prefetchedUntil - _prefetchStartLead)
             {
                 return;
             }

@@ -1,4 +1,3 @@
-using System.Buffers;
 using System.Runtime.InteropServices;
 using System.Threading.Channels;
 using SkiaSharp;
@@ -16,8 +15,9 @@ public sealed class FrameChunkStream : Stream
     private readonly ChannelWriter<FrameItem> _writer;
     private readonly CancellationToken _writeCancellationToken;
     private readonly Lock _writeLock = new();
-    private readonly byte[] _frameBuffer;
 
+    private SKBitmap _currentBitmap;
+    private IntPtr _currentPixels;
     private int _filledBytes;
     private int _frameIndex;
     private bool _completed;
@@ -58,7 +58,8 @@ public sealed class FrameChunkStream : Stream
         _framerate = framerate > 0 ? framerate : 60.0;
         _writer = writer;
         _writeCancellationToken = writeCancellationToken;
-        _frameBuffer = ArrayPool<byte>.Shared.Rent(_frameSize);
+        _currentBitmap = new SKBitmap(_width, _height, SKColorType.Bgra8888, SKAlphaType.Premul);
+        _currentPixels = _currentBitmap.GetPixels();
     }
 
     public override void Write(byte[] buffer, int offset, int count)
@@ -80,6 +81,8 @@ public sealed class FrameChunkStream : Stream
             return;
         }
 
+        List<FrameItem>? completedFrames = null;
+
         lock (_writeLock)
         {
             if (_completed)
@@ -90,7 +93,7 @@ public sealed class FrameChunkStream : Stream
             while (count > 0)
             {
                 var writableBytes = Math.Min(count, _frameSize - _filledBytes);
-                Buffer.BlockCopy(buffer, offset, _frameBuffer, _filledBytes, writableBytes);
+                Marshal.Copy(buffer, offset, IntPtr.Add(_currentPixels, _filledBytes), writableBytes);
 
                 _filledBytes += writableBytes;
                 offset += writableBytes;
@@ -98,8 +101,27 @@ public sealed class FrameChunkStream : Stream
 
                 if (_filledBytes == _frameSize)
                 {
-                    PublishCurrentFrame();
+                    completedFrames ??= new List<FrameItem>(1);
+                    completedFrames.Add(CreateCurrentFrameAndAdvance());
                 }
+            }
+        }
+
+        if (completedFrames is null)
+        {
+            return;
+        }
+
+        foreach (var frameItem in completedFrames)
+        {
+            try
+            {
+                PublishFrame(frameItem);
+            }
+            catch
+            {
+                frameItem.Dispose();
+                throw;
             }
         }
     }
@@ -115,7 +137,7 @@ public sealed class FrameChunkStream : Stream
             if (!_completed)
             {
                 _completed = true;
-                ArrayPool<byte>.Shared.Return(_frameBuffer);
+                _currentBitmap.Dispose();
                 _writer.TryComplete();
             }
 
@@ -148,46 +170,48 @@ public sealed class FrameChunkStream : Stream
         throw new NotSupportedException();
     }
 
-    private void PublishCurrentFrame()
+    private FrameItem CreateCurrentFrameAndAdvance()
     {
-        var bitmap = new SKBitmap(_width, _height, SKColorType.Bgra8888, SKAlphaType.Premul);
+        var bitmap = _currentBitmap;
+        var frameItem = new FrameItem
+        {
+            Path = _videoPath,
+            Time = CalculateFrameTime(_frameIndex),
+            Bitmap = bitmap
+        };
+
+        _frameIndex++;
+        _filledBytes = 0;
+
+        _currentBitmap = new SKBitmap(_width, _height, SKColorType.Bgra8888, SKAlphaType.Premul);
+        _currentPixels = _currentBitmap.GetPixels();
+        return frameItem;
+    }
+
+    private void PublishFrame(FrameItem frameItem)
+    {
+        // Producer thread can briefly outrun the consumer. If channel is full,
+        // wait here instead of allocating and queueing additional large frames.
+        if (_writer.TryWrite(frameItem))
+        {
+            return;
+        }
+
         try
         {
-            Marshal.Copy(_frameBuffer, 0, bitmap.GetPixels(), _frameSize);
-
-            var frameItem = new FrameItem
-            {
-                Path = _videoPath,
-                Time = CalculateFrameTime(_frameIndex),
-                Bitmap = bitmap
-            };
-
-            _frameIndex++;
-            _filledBytes = 0;
-
-            // Producer thread can briefly outrun the consumer. If channel is full,
-            // wait here instead of allocating and queueing additional large frames.
-            if (_writer.TryWrite(frameItem))
-            {
-                return;
-            }
-
-            try
-            {
-                _writer.WriteAsync(frameItem, _writeCancellationToken).AsTask().GetAwaiter().GetResult();
-            }
-            catch (OperationCanceledException) when (_writeCancellationToken.IsCancellationRequested)
-            {
-                frameItem.Dispose();
-            }
-            catch (ChannelClosedException)
-            {
-                frameItem.Dispose();
-            }
+            _writer.WriteAsync(frameItem, _writeCancellationToken).AsTask().GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException) when (_writeCancellationToken.IsCancellationRequested)
+        {
+            frameItem.Dispose();
+        }
+        catch (ChannelClosedException)
+        {
+            frameItem.Dispose();
         }
         catch
         {
-            bitmap.Dispose();
+            frameItem.Dispose();
             throw;
         }
     }
