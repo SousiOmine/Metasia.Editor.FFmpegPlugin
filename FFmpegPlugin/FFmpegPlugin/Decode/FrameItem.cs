@@ -13,8 +13,8 @@ public class FrameItem : IDisposable
     
     public (bool, TimeSpan) IsNearTime(TimeSpan time, TimeSpan threshold)
     {
-        var difference = Math.Abs((Time - time).TotalMicroseconds);
-        return (difference <= threshold.TotalMicroseconds, TimeSpan.FromMicroseconds(difference));
+        var differenceTicks = Math.Abs(Time.Ticks - time.Ticks);
+        return (differenceTicks <= threshold.Ticks, TimeSpan.FromTicks(differenceTicks));
     }
 
     public SKImage GetImage()

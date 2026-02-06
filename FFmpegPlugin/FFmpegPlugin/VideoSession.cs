@@ -1,56 +1,85 @@
-using System.Diagnostics;
 using FFmpegPlugin.Cache;
 using FFmpegPlugin.Decode;
 
 namespace FFmpegPlugin;
 
-public class VideoSession : IDisposable
+public sealed class VideoSession : IDisposable
 {
+    private static readonly TimeSpan MinForegroundWindow = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan MinPrefetchWindow = TimeSpan.FromMilliseconds(900);
+
     public readonly string Path;
+
     private readonly FFmpegDecodeSession _decodeSession;
     private readonly FrameCache _frameCache;
-    private Task? _prefetchTask = null;
-    private TimeSpan _lastPrefetchTime = TimeSpan.MinValue;
+    private readonly TimeSpan _seekTolerance;
+    private readonly TimeSpan _frameDuration;
+    private readonly TimeSpan _foregroundDecodeWindow;
+    private readonly TimeSpan _prefetchWindow;
+    private readonly TimeSpan _sequentialDeltaThreshold;
 
-    public VideoSession(string videoPath, int maxCacheSize = 1000)
+    private readonly Lock _stateLock = new();
+    private readonly CancellationTokenSource _lifetimeCts = new();
+
+    private Task? _prefetchTask;
+    private TimeSpan _lastRequestTime = TimeSpan.MinValue;
+    private TimeSpan _prefetchedUntil = TimeSpan.MinValue;
+    private bool _disposed;
+
+    public VideoSession(string videoPath, int maxCacheSize = 240)
     {
         Path = videoPath;
         _decodeSession = new FFmpegDecodeSession(videoPath);
-        _frameCache = new FrameCache(maxCacheSize);
+
+        _frameDuration = _decodeSession.Framerate > 0
+            ? TimeSpan.FromSeconds(1.0 / _decodeSession.Framerate)
+            : TimeSpan.FromMilliseconds(16.666);
+        _seekTolerance = ResolveSeekTolerance(_frameDuration);
+        _foregroundDecodeWindow = Max(MinForegroundWindow, _frameDuration * 24);
+        _prefetchWindow = Max(MinPrefetchWindow, _frameDuration * 90);
+        _sequentialDeltaThreshold = _frameDuration * 6;
+
+        _frameCache = new FrameCache(maxCacheSize, _frameDuration);
     }
 
     public async Task<FrameItem> GetFrameAsync(TimeSpan time)
     {
-        Debug.WriteLine($"GetFrameAsync呼び出し: {Path}, {time}");
-        var frame = _frameCache.TryGetFrame(Path, time, TimeSpan.FromMilliseconds(100));
-        if (frame is not null)
+        ObjectDisposedException.ThrowIf(_disposed, nameof(VideoSession));
+        if (time < TimeSpan.Zero)
         {
-            Debug.WriteLine($"キャッシュから取得: {Path}, {time}");
-            
-            // キャッシュヒット時も先読みプリフェッチを実行
-            TriggerPrefetchIfNeeded(time);
-            return frame;
+            time = TimeSpan.Zero;
         }
 
-        // 2. キャッシュにない場合、単一フレームだけを高速にデコードして即座に返す
-        Debug.WriteLine($"キャッシュミス。単一フレームをデコード: {Path}, {time}");
-        var singleFrame = await _decodeSession.GetSingleFrameAsync(time);
-        
-        if (singleFrame is null)
+        var isSequential = IsLikelySequentialRequest(time);
+
+        if (TryGetCachedFrame(time, out var cached))
         {
-            throw new InvalidOperationException($"フレームのデコードに失敗しました: {Path}, {time}");
+            UpdateRequestState(time, isSequential);
+            TriggerPrefetchIfNeeded(time, isSequential);
+            return cached;
         }
-        
-        _frameCache.Add(singleFrame); // 取得したフレームをキャッシュに追加
 
-        // 3. バックグラウンドで先方向フレームをプリフェッチ（重複デコードを防止）
-        TriggerPrefetchIfNeeded(time);
+        if (isSequential)
+        {
+            await DecodeRangeIntoCacheAsync(time, _foregroundDecodeWindow, _lifetimeCts.Token).ConfigureAwait(false);
+            if (TryGetCachedFrame(time, out cached))
+            {
+                UpdateRequestState(time, isSequential: true);
+                TriggerPrefetchIfNeeded(time, isSequential: true);
+                return cached;
+            }
+        }
 
+        var singleFrame = await DecodeSingleFrameAndCacheAsync(time, _lifetimeCts.Token).ConfigureAwait(false);
+        UpdateRequestState(time, isSequential);
+        TriggerPrefetchIfNeeded(time, isSequential);
         return singleFrame;
     }
 
     public async Task<FrameItem> GetFrameAsync(int frame)
     {
+        ObjectDisposedException.ThrowIf(_disposed, nameof(VideoSession));
+
         if (frame < 0)
         {
             throw new ArgumentOutOfRangeException(nameof(frame), "フレーム番号は0以上である必要があります。");
@@ -62,53 +91,207 @@ public class VideoSession : IDisposable
         }
 
         var time = TimeSpan.FromSeconds(frame / _decodeSession.Framerate);
-        return await GetFrameAsync(time);
-    }
-
-    private void TriggerPrefetchIfNeeded(TimeSpan currentTime)
-    {
-        // 前回のプリフェッチから十分離れていない場合はスキップ
-        if (_lastPrefetchTime != TimeSpan.MinValue)
-        {
-            var deltaSeconds = Math.Abs((currentTime - _lastPrefetchTime).TotalSeconds);
-            if (deltaSeconds < 1.0)
-                return;
-        }
-
-        // 既にプリフェッチが実行中の場合はスキップ
-        if (_prefetchTask != null && !_prefetchTask.IsCompleted)
-            return;
-
-        _lastPrefetchTime = currentTime;
-
-        // プリフェッチを開始（既にキャッシュにあるフレームはスキップ）
-        _prefetchTask = Task.Run(async () =>
-        {
-            Debug.WriteLine($"バックグラウンドプリフェッチ開始: {Path}, 開始時間={currentTime}");
-            
-            // 現在位置より少し先から3秒分をプリフェッチ
-            var prefetchStart = currentTime + TimeSpan.FromMilliseconds(500);
-            var prefetchDuration = TimeSpan.FromSeconds(3);
-            
-            // 既にキャッシュにある範囲はスキップ
-            if (_frameCache.Contains(Path, prefetchStart, TimeSpan.FromMilliseconds(100)))
-            {
-                Debug.WriteLine($"プリフェッチ範囲は既にキャッシュ済み: {Path}, {prefetchStart}");
-                return;
-            }
-
-            await foreach (var prefetchFrame in _decodeSession.DecodeAsync(prefetchStart, prefetchDuration))
-            {
-                _frameCache.Add(prefetchFrame);
-            }
-            Debug.WriteLine($"バックグラウンドプリフェッチ完了: {Path}");
-        });
+        return await GetFrameAsync(time).ConfigureAwait(false);
     }
 
     public void Dispose()
     {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        _lifetimeCts.Cancel();
+
+        try
+        {
+            _prefetchTask?.Wait(TimeSpan.FromMilliseconds(500));
+        }
+        catch (AggregateException)
+        {
+            // Dispose 時のキャンセル例外は無視
+        }
+
+        _lifetimeCts.Dispose();
         _decodeSession.Dispose();
         _frameCache.Dispose();
         GC.SuppressFinalize(this);
+    }
+
+    private bool TryGetCachedFrame(TimeSpan time, out FrameItem frame)
+    {
+        var cached = _frameCache.TryGetFrame(time, _seekTolerance);
+        if (cached is null)
+        {
+            frame = null!;
+            return false;
+        }
+
+        frame = cached;
+        return true;
+    }
+
+    private async Task<FrameItem> DecodeSingleFrameAndCacheAsync(TimeSpan time, CancellationToken cancellationToken)
+    {
+        var singleFrame = await _decodeSession.GetSingleFrameAsync(time, cancellationToken).ConfigureAwait(false);
+        if (singleFrame is null)
+        {
+            throw new InvalidOperationException($"フレームのデコードに失敗しました: {Path}, {time}");
+        }
+
+        const int maxAttempts = 3;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            if (_frameCache.Add(singleFrame))
+            {
+                UpdatePrefetchedUntil(singleFrame.Time);
+                return singleFrame;
+            }
+
+            var cached = _frameCache.TryGetFrame(time, _seekTolerance);
+            if (cached is not null)
+            {
+                singleFrame.Dispose();
+                return cached;
+            }
+
+            if (attempt < maxAttempts - 1)
+            {
+                await Task.Yield();
+            }
+        }
+
+        singleFrame.Dispose();
+        throw new InvalidOperationException($"キャッシュ重複時のフレーム再取得に失敗しました: {Path}, {time}");
+    }
+
+    private async Task DecodeRangeIntoCacheAsync(TimeSpan start, TimeSpan window, CancellationToken cancellationToken)
+    {
+        await foreach (var frame in _decodeSession.DecodeAsync(start, window, cancellationToken))
+        {
+            if (!_frameCache.Add(frame))
+            {
+                frame.Dispose();
+                continue;
+            }
+
+            UpdatePrefetchedUntil(frame.Time);
+        }
+    }
+
+    private void TriggerPrefetchIfNeeded(TimeSpan currentTime, bool isSequential)
+    {
+        if (!isSequential || _lifetimeCts.IsCancellationRequested)
+        {
+            return;
+        }
+
+        var prefetchStart = currentTime + _frameDuration;
+
+        lock (_stateLock)
+        {
+            if (_prefetchTask is { IsCompleted: false })
+            {
+                return;
+            }
+
+            if (_prefetchedUntil != TimeSpan.MinValue && prefetchStart <= _prefetchedUntil - (_frameDuration * 2))
+            {
+                return;
+            }
+
+            if (_prefetchedUntil > prefetchStart)
+            {
+                prefetchStart = _prefetchedUntil + _frameDuration;
+            }
+
+            _prefetchTask = Task.Run(
+                () => PrefetchAsync(prefetchStart, _prefetchWindow, _lifetimeCts.Token),
+                CancellationToken.None);
+        }
+    }
+
+    private async Task PrefetchAsync(TimeSpan start, TimeSpan window, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await DecodeRangeIntoCacheAsync(start, window, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // セッション破棄時の停止
+        }
+        catch
+        {
+            // プリフェッチ失敗はフォアグラウンド取得で補償する
+        }
+        finally
+        {
+            lock (_stateLock)
+            {
+                if (_prefetchTask is { IsCompleted: true })
+                {
+                    _prefetchTask = null;
+                }
+            }
+        }
+    }
+
+    private bool IsLikelySequentialRequest(TimeSpan currentTime)
+    {
+        lock (_stateLock)
+        {
+            if (_lastRequestTime == TimeSpan.MinValue)
+            {
+                return false;
+            }
+
+            var delta = currentTime - _lastRequestTime;
+            return delta >= TimeSpan.Zero && delta <= _sequentialDeltaThreshold;
+        }
+    }
+
+    private void UpdateRequestState(TimeSpan time, bool isSequential)
+    {
+        lock (_stateLock)
+        {
+            _lastRequestTime = time;
+
+            if (!isSequential)
+            {
+                _prefetchedUntil = time;
+            }
+            else if (time > _prefetchedUntil)
+            {
+                _prefetchedUntil = time;
+            }
+        }
+    }
+
+    private void UpdatePrefetchedUntil(TimeSpan time)
+    {
+        lock (_stateLock)
+        {
+            if (time > _prefetchedUntil)
+            {
+                _prefetchedUntil = time;
+            }
+        }
+    }
+
+    private static TimeSpan ResolveSeekTolerance(TimeSpan frameDuration)
+    {
+        if (frameDuration <= TimeSpan.Zero)
+        {
+            return TimeSpan.FromMilliseconds(16.666);
+        }
+
+        return TimeSpan.FromTicks(Math.Max(1, frameDuration.Ticks - 1));
+    }
+
+    private static TimeSpan Max(TimeSpan left, TimeSpan right)
+    {
+        return left >= right ? left : right;
     }
 }

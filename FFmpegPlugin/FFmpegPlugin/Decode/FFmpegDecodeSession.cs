@@ -1,12 +1,10 @@
 using System.Diagnostics;
-using System.IO;
 using System.Globalization;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
+using System.Threading.Channels;
 using FFMpegCore;
 using FFMpegCore.Enums;
 using FFMpegCore.Pipes;
-using SkiaSharp;
 using Channel = System.Threading.Channels.Channel;
 
 namespace FFmpegPlugin.Decode;
@@ -19,9 +17,7 @@ public class FFmpegDecodeSession : IDisposable
     private readonly string _videoPath;
     private readonly int _width;
     private readonly int _height;
-    private readonly int _frameSize;
     private readonly double _framerate;
-    private readonly string _ffmpegPath;
     private readonly IMediaAnalysis _mediaInfo;
     private bool _disposed = false;
 
@@ -41,8 +37,6 @@ public class FFmpegDecodeSession : IDisposable
         _height = _mediaInfo.VideoStreams[0].Height;
         _framerate = _mediaInfo.VideoStreams[0].FrameRate;
 
-        _frameSize = _width * _height * 4;
-        _ffmpegPath = Path.Combine(GlobalFFOptions.Current.BinaryFolder, "ffmpeg");
     }
 
     /// <summary>
@@ -54,52 +48,37 @@ public class FFmpegDecodeSession : IDisposable
             time = TimeSpan.Zero;
         ObjectDisposedException.ThrowIf(_disposed, nameof(FFmpegDecodeSession));
 
-        using var memoryStream = new MemoryStream();
+        using var sinkStream = new SingleFrameStream(_width, _height);
 
         try
         {
-            // 高速化のため、-ssを入力前に配置（キーフレームシーク）
-            // 精度とのトレードオフだが、キャッシュ許容範囲内であれば問題ない
-            // var seekTime = time > TimeSpan.FromSeconds(1) 
-            //     ? time - TimeSpan.FromSeconds(1) 
-            //     : TimeSpan.Zero;
-            
             await FFMpegArguments
                 .FromFileInput(_videoPath, true, opt => opt
-                    //.Seek(seekTime)
                     .Seek(time)
                 )
                 .OutputToPipe(
-                    new StreamPipeSink(memoryStream),
+                    new StreamPipeSink(sinkStream),
                     opt => opt
                         .ForceFormat("rawvideo")
                         .WithSpeedPreset(Speed.UltraFast)
                         .WithCustomArgument("-pix_fmt bgra")
                         .WithCustomArgument("-an -sn -dn")
                         .WithCustomArgument("-frames:v 1")
-                        //.Seek(time) // 入力後にも正確なシーク
                 )
                 .CancellableThrough(cancellationToken)
                 .ProcessAsynchronously();
 
-            var frameData = memoryStream.ToArray();
-            // フレームデータのサイズが正しいかチェック
-            if (frameData.Length != _frameSize)
+            if (!sinkStream.HasFrame)
             {
-                Debug.WriteLine($"フレームサイズが一致しません: 期待={_frameSize}, 実際={frameData.Length}");
+                Debug.WriteLine($"フレームの取得に失敗しました: {_videoPath}, {time}");
                 return null;
             }
-
-            // BGRAフォーマットのバイト配列からSKBitmapを作成
-            var bitmap = new SKBitmap(_width, _height, SKColorType.Bgra8888, SKAlphaType.Premul);
-            // GetPixels()で取得したネイティブバッファにコピーして、ポインタのライフタイム問題を回避
-            Marshal.Copy(frameData, 0, bitmap.GetPixels(), frameData.Length);
 
             return new FrameItem
             {
                 Path = _videoPath,
                 Time = time,
-                Bitmap = bitmap
+                Bitmap = sinkStream.TakeBitmap()
             };
         }
         catch (Exception ex)
@@ -123,9 +102,24 @@ public class FFmpegDecodeSession : IDisposable
             maxLength = TimeSpan.Zero;
         ObjectDisposedException.ThrowIf(_disposed, nameof(FFmpegDecodeSession));
 
-        var channel = Channel.CreateUnbounded<byte[]>();
+        using var decodeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var decodeToken = decodeCts.Token;
 
-        await using var sinkStream = new FrameChunkStream(_frameSize, channel.Writer);
+        var channel = Channel.CreateBounded<FrameItem>(new BoundedChannelOptions(8)
+        {
+            SingleReader = true,
+            SingleWriter = true,
+            FullMode = BoundedChannelFullMode.Wait
+        });
+
+        await using var sinkStream = new FrameChunkStream(
+            _width,
+            _height,
+            _videoPath,
+            startTime,
+            _framerate,
+            channel.Writer,
+            decodeToken);
 
         // FFmpegプロセスをバックグラウンドで開始
         var ffmpegTask = Task.Run(async () =>
@@ -133,11 +127,9 @@ public class FFmpegDecodeSession : IDisposable
             try
             {
                 var maxLengthStr = maxLength.TotalSeconds.ToString("F6", CultureInfo.InvariantCulture);
-                var frameRateStr = _framerate.ToString("F3", CultureInfo.InvariantCulture);
                 
                 await FFMpegArguments
                     .FromFileInput(_videoPath, true, opt => opt
-                        //.Seek(startTime > TimeSpan.FromSeconds(1) ? startTime - TimeSpan.FromSeconds(1) : TimeSpan.Zero)
                         .Seek(startTime)
                     )
                     .OutputToPipe(
@@ -148,60 +140,51 @@ public class FFmpegDecodeSession : IDisposable
                             .WithCustomArgument("-pix_fmt bgra")
                             .WithCustomArgument("-an -sn -dn")
                             .WithCustomArgument($"-t {maxLengthStr}")
-                            //.Seek(startTime)
                     )
-                    .CancellableThrough(cancellationToken)
+                    .CancellableThrough(decodeToken)
                     .ProcessAsynchronously();
+            }
+            catch (OperationCanceledException) when (decodeToken.IsCancellationRequested)
+            {
+                // linked token 経由の停止は正常系
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"FFmpeg処理エラー: {ex.Message}");
-                channel.Writer.Complete(ex);
+                channel.Writer.TryComplete(ex);
+                return;
             }
             finally
             {
-                channel.Writer.Complete();
+                channel.Writer.TryComplete();
             }
-        }, cancellationToken);
+        }, CancellationToken.None);
 
-        // チャネルからフレームデータを読み取り、FrameItemに変換
-        int frameIndex = 0;
-        await foreach (var frameData in channel.Reader.ReadAllAsync(cancellationToken))
-        {
-            if (cancellationToken.IsCancellationRequested)
-                break;
-
-            // BGRAフォーマットのバイト配列からSKBitmapを作成
-            var bitmap = new SKBitmap(_width, _height, SKColorType.Bgra8888, SKAlphaType.Premul);
-            // GetPixels()で取得したネイティブバッファにコピーして、ポインタのライフタイム問題を回避
-            Marshal.Copy(frameData, 0, bitmap.GetPixels(), frameData.Length);
-
-            // フレームの時間を計算（TimeSpanオーバーフロー防止）
-            double frameTimeInSeconds = startTime.TotalSeconds + (frameIndex / _framerate);
-            if (frameTimeInSeconds > TimeSpan.MaxValue.TotalSeconds)
-            {
-                frameTimeInSeconds = TimeSpan.MaxValue.TotalSeconds;
-            }
-            TimeSpan frameTime = TimeSpan.FromSeconds(frameTimeInSeconds);
-
-            yield return new FrameItem
-            {
-                Path = _videoPath,
-                Time = frameTime,
-                Bitmap = bitmap
-            };
-
-            frameIndex++;
-        }
-
-        // FFmpegプロセスの完了を待機
         try
         {
-            await ffmpegTask;
+            await foreach (var frame in channel.Reader.ReadAllAsync(decodeToken))
+            {
+                yield return frame;
+            }
         }
-        catch (OperationCanceledException)
+        finally
         {
-            // キャンセルされた場合は無視
+            decodeCts.Cancel();
+
+            // FFmpegプロセスの完了を待機
+            try
+            {
+                await ffmpegTask;
+            }
+            catch (OperationCanceledException) when (decodeToken.IsCancellationRequested)
+            {
+                // キャンセルされた場合は無視
+            }
+
+            while (channel.Reader.TryRead(out var remainingFrame))
+            {
+                remainingFrame.Dispose();
+            }
         }
     }
 

@@ -17,3 +17,10 @@ dotnet run -c Release --project FFmpegPlugin.Benchmarks
 ## 結果
 
 `BenchmarkDotNet.Artifacts/results` に Markdown / HTML / CSV が配置される
+
+## ベンチ項目
+
+- `RandomSeek_GetSingleFrameAsync`: ランダム位置の単発フレーム取得
+- `NearSeek_GetFrameAsync`: 近傍シーク（1〜3フレーム先）を大量反復して計測
+- `SequentialDecode_DecodeAsync`: 0.5秒窓の連続デコード
+- `Realtime60fps_GetFrameAsync`: 60fps相当の連続要求（60フレーム）を `OperationsPerInvoke=60` で計測

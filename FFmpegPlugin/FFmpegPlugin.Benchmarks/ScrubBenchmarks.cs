@@ -5,18 +5,25 @@ using FFMpegCore;
 
 public class ScrubBenchmarks
 {
-    private const int RandomSeekCount = 240;
-    private const int NearSeekCount = 240;
-    private static readonly TimeSpan SequentialDecodeWindow = TimeSpan.FromSeconds(1.5);
+    private const int RandomSeekCount = 60;
+    private const int NearSeekCount = 60;
+    private const int NearSeekOperationsPerInvoke = 256;
+    private const int RealtimeOperationsPerInvoke = 60;
+    private static readonly TimeSpan SequentialDecodeWindow = TimeSpan.FromSeconds(0.5);
+    private static readonly TimeSpan RealTimePlaybackWindow = TimeSpan.FromSeconds(1);
+    private const double TargetFps = 60.0;
 
     private FFmpegDecodeSession? _decodeSession;
     private VideoSession? _videoSession;
     private TimeSpan[] _randomSeekTimes = [];
     private TimeSpan[] _nearSeekTimes = [];
     private TimeSpan[] _sequentialStartTimes = [];
+    private TimeSpan[] _realTimeStartTimes = [];
     private int _randomSeekIndex = -1;
     private int _nearSeekIndex = -1;
     private int _sequentialIndex = -1;
+    private int _realTimeIndex = -1;
+    private TimeSpan _realtimeBenchmarkStart;
 
     [GlobalSetup]
     public void Setup()
@@ -35,7 +42,8 @@ public class ScrubBenchmarks
 
         _randomSeekTimes = BuildRandomSeekTimes(duration, RandomSeekCount);
         _nearSeekTimes = BuildNearSeekTimes(duration, NearSeekCount, _decodeSession.Framerate);
-        _sequentialStartTimes = BuildSequentialStartTimes(duration, SequentialDecodeWindow, 120);
+        _sequentialStartTimes = BuildSequentialStartTimes(duration, SequentialDecodeWindow, 8);
+        _realTimeStartTimes = BuildSequentialStartTimes(duration, RealTimePlaybackWindow, 8);
     }
 
     [GlobalCleanup]
@@ -62,14 +70,22 @@ public class ScrubBenchmarks
         return width;
     }
 
-    [Benchmark(Description = "NearSeek_GetFrameAsync")]
+    [Benchmark(Description = "NearSeek_GetFrameAsync", OperationsPerInvoke = NearSeekOperationsPerInvoke)]
+    [MinIterationTime(100)]
     public async Task<int> NearSeek_GetFrameAsync()
     {
         EnsureSessions();
 
-        var time = Next(_nearSeekTimes, ref _nearSeekIndex);
-        var frame = await _videoSession!.GetFrameAsync(time);
-        return frame.Bitmap.Width;
+        var widthSum = 0;
+
+        for (var i = 0; i < NearSeekOperationsPerInvoke; i++)
+        {
+            var time = Next(_nearSeekTimes, ref _nearSeekIndex);
+            var frame = await _videoSession!.GetFrameAsync(time);
+            widthSum += frame.Bitmap.Width;
+        }
+
+        return widthSum;
     }
 
     [Benchmark(Description = "SequentialDecode_DecodeAsync")]
@@ -78,7 +94,7 @@ public class ScrubBenchmarks
         EnsureSessions();
 
         var start = Next(_sequentialStartTimes, ref _sequentialIndex);
-        int decodedFrames = 0;
+        var decodedFrames = 0;
 
         await foreach (var frame in _decodeSession!.DecodeAsync(start, SequentialDecodeWindow))
         {
@@ -87,6 +103,41 @@ public class ScrubBenchmarks
         }
 
         return decodedFrames;
+    }
+
+    [Benchmark(Description = "Realtime60fps_GetFrameAsync", OperationsPerInvoke = RealtimeOperationsPerInvoke)]
+    [MinIterationTime(100)]
+    public async Task<int> Realtime60fps_GetFrameAsync()
+    {
+        EnsureSessions();
+
+        var widthSum = 0;
+        var frameDurationTicks = TimeSpan.FromSeconds(1.0 / TargetFps).Ticks;
+
+        for (var i = 0; i < RealtimeOperationsPerInvoke; i++)
+        {
+            var requestTime = _realtimeBenchmarkStart + TimeSpan.FromTicks(frameDurationTicks * i);
+            var frame = await _videoSession!.GetFrameAsync(requestTime);
+            widthSum += frame.Bitmap.Width;
+        }
+
+        return widthSum;
+    }
+
+    [IterationSetup(Target = nameof(Realtime60fps_GetFrameAsync))]
+    public void SetupRealtimeBenchmark()
+    {
+        EnsureSessions();
+
+        _realtimeBenchmarkStart = Next(_realTimeStartTimes, ref _realTimeIndex);
+        var frameDurationTicks = TimeSpan.FromSeconds(1.0 / TargetFps).Ticks;
+
+        // 再生開始直後のバッファ立ち上がりを除いた、定常時のプレビュー性能を計測する。
+        for (var i = 0; i < 4; i++)
+        {
+            var requestTime = _realtimeBenchmarkStart + TimeSpan.FromTicks(frameDurationTicks * i);
+            _videoSession!.GetFrameAsync(requestTime).GetAwaiter().GetResult();
+        }
     }
 
     private void EnsureSessions()
@@ -114,9 +165,9 @@ public class ScrubBenchmarks
 
         var random = new Random(20260206);
         var values = new TimeSpan[count];
-
         var rangeSeconds = Math.Max(0.001, (max - min).TotalSeconds);
-        for (int i = 0; i < values.Length; i++)
+
+        for (var i = 0; i < values.Length; i++)
         {
             values[i] = min + TimeSpan.FromSeconds(random.NextDouble() * rangeSeconds);
         }
@@ -139,7 +190,7 @@ public class ScrubBenchmarks
         }
 
         var current = TimeSpan.FromSeconds(random.NextDouble() * Math.Max(0.001, maxStart.TotalSeconds));
-        for (int i = 0; i < values.Length; i++)
+        for (var i = 0; i < values.Length; i++)
         {
             var stepFrames = random.Next(1, 4);
             current += frameDuration * stepFrames;
@@ -165,7 +216,7 @@ public class ScrubBenchmarks
         }
 
         var random = new Random(20260206);
-        for (int i = 0; i < values.Length; i++)
+        for (var i = 0; i < values.Length; i++)
         {
             values[i] = TimeSpan.FromSeconds(random.NextDouble() * Math.Max(0.001, maxStart.TotalSeconds));
         }

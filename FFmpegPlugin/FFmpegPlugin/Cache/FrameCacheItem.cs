@@ -1,15 +1,15 @@
-﻿using FFmpegPlugin.Decode;
+using FFmpegPlugin.Decode;
 
 namespace FFmpegPlugin.Cache;
 
-public class FrameCacheItem
+public sealed class FrameCacheItem
 {
     public FrameItem Frame { get; }
-    public DateTime LastUsedTime { get; set; }
-    
-    public FrameCacheItem(FrameItem frame, DateTime lastUsedTime)
+    public LinkedListNode<long> LruNode { get; }
+
+    public FrameCacheItem(FrameItem frame, LinkedListNode<long> lruNode)
     {
         Frame = frame;
-        LastUsedTime = lastUsedTime;
+        LruNode = lruNode;
     }
 }
