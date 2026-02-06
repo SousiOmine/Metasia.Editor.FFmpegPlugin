@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using FFmpegPlugin.Cache;
 using FFmpegPlugin.Decode;
 
@@ -5,27 +6,31 @@ namespace FFmpegPlugin;
 
 public sealed class VideoSession : IDisposable
 {
-    private static readonly TimeSpan MinForegroundWindow = TimeSpan.FromMilliseconds(80);
-    private static readonly TimeSpan MinPrefetchWindow = TimeSpan.FromMilliseconds(900);
+    private static readonly TimeSpan WorkerRestartGap = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan SequentialWaitTimeout = TimeSpan.FromMilliseconds(45);
 
     public readonly string Path;
 
     private readonly FFmpegDecodeSession _decodeSession;
     private readonly FrameCache _frameCache;
+    private readonly SequentialDecodeWorker _decodeWorker;
     private readonly TimeSpan _seekTolerance;
     private readonly TimeSpan _frameDuration;
-    private readonly TimeSpan _foregroundDecodeWindow;
-    private readonly TimeSpan _prefetchWindow;
-    private readonly TimeSpan _prefetchStartLead;
     private readonly TimeSpan _sequentialDeltaThreshold;
-
     private readonly Lock _stateLock = new();
+    private readonly SemaphoreSlim _frameArrivedSignal = new(0, int.MaxValue);
     private readonly CancellationTokenSource _lifetimeCts = new();
 
-    private Task? _prefetchTask;
     private TimeSpan _lastRequestTime = TimeSpan.MinValue;
-    private TimeSpan _prefetchedUntil = TimeSpan.MinValue;
+    private TimeSpan _workerTargetTime = TimeSpan.MinValue;
+    private TimeSpan _workerDecodedUntil = TimeSpan.MinValue;
+    private bool _workerNeedsRestart = true;
+    private long _fallbackSingleDecodeCount;
+    private long _workerRestartCount;
     private bool _disposed;
+
+    internal long FallbackSingleDecodeCount => Interlocked.Read(ref _fallbackSingleDecodeCount);
+    internal long WorkerRestartCount => Interlocked.Read(ref _workerRestartCount);
 
     public VideoSession(string videoPath, int maxCacheSize = 240)
     {
@@ -36,50 +41,58 @@ public sealed class VideoSession : IDisposable
             ? TimeSpan.FromSeconds(1.0 / _decodeSession.Framerate)
             : TimeSpan.FromMilliseconds(16.666);
         _seekTolerance = ResolveSeekTolerance(_frameDuration);
-        _foregroundDecodeWindow = Max(MinForegroundWindow, _frameDuration * 8);
-        _prefetchWindow = Max(MinPrefetchWindow, _frameDuration * 90);
-        _prefetchStartLead = Max(_frameDuration * 24, _foregroundDecodeWindow);
-        _sequentialDeltaThreshold = _frameDuration * 6;
+        _sequentialDeltaThreshold = _frameDuration * 10;
 
         _frameCache = new FrameCache(maxCacheSize, _frameDuration);
+        _decodeWorker = new SequentialDecodeWorker(
+            _decodeSession,
+            _frameDuration,
+            OnWorkerFrameDecoded,
+            ex => Debug.WriteLine($"シーケンシャルデコードワーカーエラー: {ex.Message}"));
     }
 
     public async Task<FrameItem> GetFrameAsync(TimeSpan time)
     {
         ObjectDisposedException.ThrowIf(_disposed, nameof(VideoSession));
-        if (time < TimeSpan.Zero)
-        {
-            time = TimeSpan.Zero;
-        }
+        var requestTime = ClampRequestTime(time);
+        var isSequential = IsLikelySequentialRequest(requestTime);
 
-        var isSequential = IsLikelySequentialRequest(time);
-
-        if (TryGetCachedFrame(time, out var cached))
+        if (TryGetCachedFrame(requestTime, out var cached))
         {
-            UpdateRequestState(time, isSequential);
-            TriggerPrefetchIfNeeded(time, isSequential);
+            if (!isSequential)
+            {
+                MarkWorkerRestartNeeded(requestTime);
+            }
+            else
+            {
+                await EnsureWorkerReadyAsync(requestTime).ConfigureAwait(false);
+            }
+
+            UpdateRequestState(requestTime);
             return cached;
         }
 
         if (!isSequential)
         {
-            UpdateRequestState(time, isSequential: false);
-            var seekFrame = await DecodeSingleFrameAndCacheAsync(time, _lifetimeCts.Token).ConfigureAwait(false);
-            TriggerPrefetchIfNeeded(time, isSequential: true);
+            var seekFrame = await DecodeSingleFrameAndCacheAsync(requestTime, _lifetimeCts.Token).ConfigureAwait(false);
+            MarkWorkerRestartNeeded(requestTime);
+            UpdateRequestState(requestTime);
             return seekFrame;
         }
 
-        await DecodeRangeIntoCacheAsync(time, _foregroundDecodeWindow, _lifetimeCts.Token).ConfigureAwait(false);
-        if (TryGetCachedFrame(time, out cached))
+        await EnsureWorkerReadyAsync(requestTime).ConfigureAwait(false);
+
+        var cachedFrame = await WaitForCachedFrameAsync(requestTime, SequentialWaitTimeout, _lifetimeCts.Token).ConfigureAwait(false);
+        if (cachedFrame is not null)
         {
-            UpdateRequestState(time, isSequential: true);
-            TriggerPrefetchIfNeeded(time, isSequential: true);
-            return cached;
+            UpdateRequestState(requestTime);
+            return cachedFrame;
         }
 
-        var singleFrame = await DecodeSingleFrameAndCacheAsync(time, _lifetimeCts.Token).ConfigureAwait(false);
-        UpdateRequestState(time, isSequential: true);
-        TriggerPrefetchIfNeeded(time, isSequential: true);
+        Interlocked.Increment(ref _fallbackSingleDecodeCount);
+        var singleFrame = await DecodeSingleFrameAndCacheAsync(requestTime, _lifetimeCts.Token).ConfigureAwait(false);
+        UpdateWorkerDemand(requestTime);
+        UpdateRequestState(requestTime);
         return singleFrame;
     }
 
@@ -113,13 +126,18 @@ public sealed class VideoSession : IDisposable
 
         try
         {
-            _prefetchTask?.Wait(TimeSpan.FromMilliseconds(500));
+            _decodeWorker.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
-        catch (AggregateException)
+        catch (OperationCanceledException)
         {
-            // Dispose 時のキャンセル例外は無視
+            // session cancellation
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"デコードワーカー停止エラー: {ex.Message}");
         }
 
+        _frameArrivedSignal.Dispose();
         _lifetimeCts.Dispose();
         _decodeSession.Dispose();
         _frameCache.Dispose();
@@ -139,6 +157,36 @@ public sealed class VideoSession : IDisposable
         return true;
     }
 
+    private async Task<FrameItem?> WaitForCachedFrameAsync(TimeSpan time, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        if (TryGetCachedFrame(time, out var cached))
+        {
+            return cached;
+        }
+
+        var startTimestamp = Stopwatch.GetTimestamp();
+        while (true)
+        {
+            var elapsed = Stopwatch.GetElapsedTime(startTimestamp);
+            var remaining = timeout - elapsed;
+            if (remaining <= TimeSpan.Zero)
+            {
+                return null;
+            }
+
+            var signaled = await _frameArrivedSignal.WaitAsync(remaining, cancellationToken).ConfigureAwait(false);
+            if (!signaled)
+            {
+                return null;
+            }
+
+            if (TryGetCachedFrame(time, out cached))
+            {
+                return cached;
+            }
+        }
+    }
+
     private async Task<FrameItem> DecodeSingleFrameAndCacheAsync(TimeSpan time, CancellationToken cancellationToken)
     {
         var singleFrame = await _decodeSession.GetSingleFrameAsync(time, cancellationToken).ConfigureAwait(false);
@@ -152,7 +200,7 @@ public sealed class VideoSession : IDisposable
         {
             if (_frameCache.Add(singleFrame))
             {
-                UpdatePrefetchedUntil(singleFrame.Time);
+                OnFrameAdded(singleFrame.Time);
                 return singleFrame;
             }
 
@@ -173,76 +221,91 @@ public sealed class VideoSession : IDisposable
         throw new InvalidOperationException($"キャッシュ重複時のフレーム再取得に失敗しました: {Path}, {time}");
     }
 
-    private async Task DecodeRangeIntoCacheAsync(TimeSpan start, TimeSpan window, CancellationToken cancellationToken)
+    private void OnWorkerFrameDecoded(FrameItem frame)
     {
-        await foreach (var frame in _decodeSession.DecodeAsync(start, window, cancellationToken))
+        if (!_frameCache.Add(frame))
         {
-            if (!_frameCache.Add(frame))
-            {
-                frame.Dispose();
-                continue;
-            }
-
-            UpdatePrefetchedUntil(frame.Time);
+            frame.Dispose();
+            return;
         }
+
+        OnFrameAdded(frame.Time);
     }
 
-    private void TriggerPrefetchIfNeeded(TimeSpan currentTime, bool isSequential)
+    private void OnFrameAdded(TimeSpan frameTime)
     {
-        if (!isSequential || _lifetimeCts.IsCancellationRequested)
+        lock (_stateLock)
+        {
+            if (frameTime > _workerDecodedUntil)
+            {
+                _workerDecodedUntil = frameTime;
+            }
+        }
+
+        _frameArrivedSignal.Release();
+    }
+
+    private async Task RestartWorkerAsync(TimeSpan requestTime)
+    {
+        if (_lifetimeCts.IsCancellationRequested)
         {
             return;
         }
 
-        var prefetchStart = currentTime + _frameDuration;
-
         lock (_stateLock)
         {
-            if (_prefetchTask is { IsCompleted: false })
-            {
-                return;
-            }
+            _workerTargetTime = requestTime;
+            _workerDecodedUntil = TimeSpan.MinValue;
+            _workerNeedsRestart = false;
+        }
 
-            if (_prefetchedUntil != TimeSpan.MinValue && prefetchStart <= _prefetchedUntil - _prefetchStartLead)
-            {
-                return;
-            }
+        Interlocked.Increment(ref _workerRestartCount);
+        await _decodeWorker.EnsureStartedAt(requestTime, _lifetimeCts.Token).ConfigureAwait(false);
+    }
 
-            if (_prefetchedUntil > prefetchStart)
-            {
-                prefetchStart = _prefetchedUntil + _frameDuration;
-            }
+    private async Task EnsureWorkerReadyAsync(TimeSpan requestTime)
+    {
+        var shouldRestart = false;
+        lock (_stateLock)
+        {
+            shouldRestart = _workerNeedsRestart;
+        }
 
-            _prefetchTask = Task.Run(
-                () => PrefetchAsync(prefetchStart, _prefetchWindow, _lifetimeCts.Token),
-                CancellationToken.None);
+        if (shouldRestart || ShouldRestartWorker(requestTime))
+        {
+            await RestartWorkerAsync(requestTime).ConfigureAwait(false);
+            return;
+        }
+
+        UpdateWorkerDemand(requestTime);
+    }
+
+    private void MarkWorkerRestartNeeded(TimeSpan requestTime)
+    {
+        lock (_stateLock)
+        {
+            _workerNeedsRestart = true;
+            _workerTargetTime = requestTime;
         }
     }
 
-    private async Task PrefetchAsync(TimeSpan start, TimeSpan window, CancellationToken cancellationToken)
+    private void UpdateWorkerDemand(TimeSpan requestTime)
     {
-        try
+        lock (_stateLock)
         {
-            await DecodeRangeIntoCacheAsync(start, window, cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            // セッション破棄時の停止
-        }
-        catch
-        {
-            // プリフェッチ失敗はフォアグラウンド取得で補償する
-        }
-        finally
-        {
-            lock (_stateLock)
+            if (_workerTargetTime == TimeSpan.MinValue || requestTime > _workerTargetTime)
             {
-                if (_prefetchTask is { IsCompleted: true })
-                {
-                    _prefetchTask = null;
-                }
+                _workerTargetTime = requestTime;
+            }
+
+            var decodedUntil = _decodeWorker.DecodedUntil;
+            if (decodedUntil > _workerDecodedUntil)
+            {
+                _workerDecodedUntil = decodedUntil;
             }
         }
+
+        _decodeWorker.UpdateDemand(requestTime);
     }
 
     private bool IsLikelySequentialRequest(TimeSpan currentTime)
@@ -259,32 +322,66 @@ public sealed class VideoSession : IDisposable
         }
     }
 
-    private void UpdateRequestState(TimeSpan time, bool isSequential)
+    private bool ShouldRestartWorker(TimeSpan requestTime)
+    {
+        var isRunning = _decodeWorker.IsRunning;
+        var decodedUntil = _decodeWorker.DecodedUntil;
+
+        lock (_stateLock)
+        {
+            if (!isRunning)
+            {
+                return true;
+            }
+
+            if (_workerTargetTime == TimeSpan.MinValue)
+            {
+                return true;
+            }
+
+            if (decodedUntil > _workerDecodedUntil)
+            {
+                _workerDecodedUntil = decodedUntil;
+            }
+
+            if (_workerDecodedUntil == TimeSpan.MinValue)
+            {
+                return false;
+            }
+
+            var gap = requestTime - _workerDecodedUntil;
+            return gap >= WorkerRestartGap;
+        }
+    }
+
+    private void UpdateRequestState(TimeSpan time)
     {
         lock (_stateLock)
         {
             _lastRequestTime = time;
-
-            if (!isSequential)
-            {
-                _prefetchedUntil = time;
-            }
-            else if (time > _prefetchedUntil)
-            {
-                _prefetchedUntil = time;
-            }
         }
     }
 
-    private void UpdatePrefetchedUntil(TimeSpan time)
+    private TimeSpan ClampRequestTime(TimeSpan time)
     {
-        lock (_stateLock)
+        if (time < TimeSpan.Zero)
         {
-            if (time > _prefetchedUntil)
-            {
-                _prefetchedUntil = time;
-            }
+            return TimeSpan.Zero;
         }
+
+        var duration = _decodeSession.Duration;
+        if (duration <= TimeSpan.Zero)
+        {
+            return time;
+        }
+
+        var maxTime = duration - _frameDuration;
+        if (maxTime <= TimeSpan.Zero)
+        {
+            return TimeSpan.Zero;
+        }
+
+        return time > maxTime ? maxTime : time;
     }
 
     private static TimeSpan ResolveSeekTolerance(TimeSpan frameDuration)
@@ -295,10 +392,5 @@ public sealed class VideoSession : IDisposable
         }
 
         return TimeSpan.FromTicks(Math.Max(1, frameDuration.Ticks - 1));
-    }
-
-    private static TimeSpan Max(TimeSpan left, TimeSpan right)
-    {
-        return left >= right ? left : right;
     }
 }

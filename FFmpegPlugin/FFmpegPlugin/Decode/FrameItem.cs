@@ -7,6 +7,7 @@ public class FrameItem : IDisposable
     public string Path { get; set; } = string.Empty;
     public TimeSpan Time { get; set; }
     public required SKBitmap Bitmap { get; set; }
+    public Action<SKBitmap>? BitmapReleaser { get; init; }
     private SKImage? _image;
     
     private bool _disposed = false;
@@ -35,7 +36,15 @@ public class FrameItem : IDisposable
         if (!_disposed)
         {
             _image?.Dispose();
-            Bitmap?.Dispose();
+            if (BitmapReleaser is not null)
+            {
+                BitmapReleaser(Bitmap);
+            }
+            else
+            {
+                Bitmap.Dispose();
+            }
+
             _disposed = true;
         }
         GC.SuppressFinalize(this);

@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using SkiaSharp;
 
 namespace FFmpegPlugin.Decode;
@@ -6,6 +5,7 @@ namespace FFmpegPlugin.Decode;
 public sealed class SingleFrameStream : Stream
 {
     private readonly int _frameSize;
+    private readonly BitmapPool _bitmapPool;
     private readonly SKBitmap _bitmap;
     private readonly IntPtr _pixels;
     private readonly Lock _writeLock = new();
@@ -13,7 +13,7 @@ public sealed class SingleFrameStream : Stream
     private bool _taken;
     private bool _disposed;
 
-    public SingleFrameStream(int width, int height)
+    public SingleFrameStream(int width, int height, BitmapPool bitmapPool)
     {
         if (width <= 0)
         {
@@ -31,8 +31,11 @@ public sealed class SingleFrameStream : Stream
             throw new ArgumentOutOfRangeException(nameof(width), "Frame size is too large.");
         }
 
+        ArgumentNullException.ThrowIfNull(bitmapPool);
+
         _frameSize = (int)frameSize;
-        _bitmap = new SKBitmap(width, height, SKColorType.Bgra8888, SKAlphaType.Premul);
+        _bitmapPool = bitmapPool;
+        _bitmap = _bitmapPool.Rent();
         _pixels = _bitmap.GetPixels();
     }
 
@@ -89,7 +92,7 @@ public sealed class SingleFrameStream : Stream
             }
 
             var writableBytes = Math.Min(count, _frameSize - _filledBytes);
-            Marshal.Copy(buffer, offset, IntPtr.Add(_pixels, _filledBytes), writableBytes);
+            CopyToBitmap(buffer, offset, IntPtr.Add(_pixels, _filledBytes), writableBytes);
             _filledBytes += writableBytes;
         }
     }
@@ -110,7 +113,7 @@ public sealed class SingleFrameStream : Stream
             _disposed = true;
             if (disposing && !_taken)
             {
-                _bitmap.Dispose();
+                _bitmapPool.Return(_bitmap);
             }
 
             base.Dispose(disposing);
@@ -140,5 +143,12 @@ public sealed class SingleFrameStream : Stream
     public override void SetLength(long value)
     {
         throw new NotSupportedException();
+    }
+
+    private static unsafe void CopyToBitmap(byte[] source, int sourceOffset, IntPtr destination, int count)
+    {
+        var sourceSpan = source.AsSpan(sourceOffset, count);
+        var destinationSpan = new Span<byte>((void*)destination, count);
+        sourceSpan.CopyTo(destinationSpan);
     }
 }

@@ -27,3 +27,7 @@ dotnet run -c Release --project FFmpegPlugin.Benchmarks
 - `SeekLatency_Profiled`: シーク後のフレーム到達時間をサンプリングし、p95/p99などを出力
 - `Realtime60fps_JankStats`: 60fps連続要求の遅延分布と閾値超過フレーム数を出力
 - `PlaybackAndSeekScenario`: 再生→シークを繰り返すシナリオの遅延分布を出力
+- `Preview20s_Once`: 約20秒のプレビュー再生を実時間(60fpsペース)で1回計測（CSVのみ保存）
+  - タイムラインCSVは `BenchmarkDotNet.Artifacts/results` に保存され、保存先がログに表示される
+  - CSV列は `frame,decode_ms,lateness_ms`
+  - プレビュー用ベンチは単発ジョブで実行される

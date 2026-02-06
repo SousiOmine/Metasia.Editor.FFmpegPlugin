@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using System.Threading.Channels;
 using SkiaSharp;
 
@@ -9,6 +8,7 @@ public sealed class FrameChunkStream : Stream
     private readonly int _width;
     private readonly int _height;
     private readonly int _frameSize;
+    private readonly BitmapPool _bitmapPool;
     private readonly string _videoPath;
     private readonly TimeSpan _startTime;
     private readonly double _framerate;
@@ -25,6 +25,7 @@ public sealed class FrameChunkStream : Stream
     public FrameChunkStream(
         int width,
         int height,
+        BitmapPool bitmapPool,
         string videoPath,
         TimeSpan startTime,
         double framerate,
@@ -42,6 +43,7 @@ public sealed class FrameChunkStream : Stream
         }
 
         ArgumentNullException.ThrowIfNull(videoPath);
+        ArgumentNullException.ThrowIfNull(bitmapPool);
         ArgumentNullException.ThrowIfNull(writer);
 
         var frameSize = (long)width * height * 4;
@@ -53,12 +55,13 @@ public sealed class FrameChunkStream : Stream
         _width = width;
         _height = height;
         _frameSize = (int)frameSize;
+        _bitmapPool = bitmapPool;
         _videoPath = videoPath;
         _startTime = startTime;
         _framerate = framerate > 0 ? framerate : 60.0;
         _writer = writer;
         _writeCancellationToken = writeCancellationToken;
-        _currentBitmap = new SKBitmap(_width, _height, SKColorType.Bgra8888, SKAlphaType.Premul);
+        _currentBitmap = _bitmapPool.Rent();
         _currentPixels = _currentBitmap.GetPixels();
     }
 
@@ -93,7 +96,7 @@ public sealed class FrameChunkStream : Stream
             while (count > 0)
             {
                 var writableBytes = Math.Min(count, _frameSize - _filledBytes);
-                Marshal.Copy(buffer, offset, IntPtr.Add(_currentPixels, _filledBytes), writableBytes);
+                CopyToBitmap(buffer, offset, IntPtr.Add(_currentPixels, _filledBytes), writableBytes);
 
                 _filledBytes += writableBytes;
                 offset += writableBytes;
@@ -137,7 +140,7 @@ public sealed class FrameChunkStream : Stream
             if (!_completed)
             {
                 _completed = true;
-                _currentBitmap.Dispose();
+                _bitmapPool.Return(_currentBitmap);
                 _writer.TryComplete();
             }
 
@@ -177,13 +180,14 @@ public sealed class FrameChunkStream : Stream
         {
             Path = _videoPath,
             Time = CalculateFrameTime(_frameIndex),
-            Bitmap = bitmap
+            Bitmap = bitmap,
+            BitmapReleaser = _bitmapPool.Return
         };
 
         _frameIndex++;
         _filledBytes = 0;
 
-        _currentBitmap = new SKBitmap(_width, _height, SKColorType.Bgra8888, SKAlphaType.Premul);
+        _currentBitmap = _bitmapPool.Rent();
         _currentPixels = _currentBitmap.GetPixels();
         return frameItem;
     }
@@ -225,5 +229,12 @@ public sealed class FrameChunkStream : Stream
         }
 
         return TimeSpan.FromSeconds(seconds);
+    }
+
+    private static unsafe void CopyToBitmap(byte[] source, int sourceOffset, IntPtr destination, int count)
+    {
+        var sourceSpan = source.AsSpan(sourceOffset, count);
+        var destinationSpan = new Span<byte>((void*)destination, count);
+        sourceSpan.CopyTo(destinationSpan);
     }
 }

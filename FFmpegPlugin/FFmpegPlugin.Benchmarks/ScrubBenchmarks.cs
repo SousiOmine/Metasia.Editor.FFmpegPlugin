@@ -115,7 +115,7 @@ public class ScrubBenchmarks
             var stopwatch = Stopwatch.StartNew();
             var frame = await _videoSession!.GetFrameAsync(time);
             stopwatch.Stop();
-            samples.Add(stopwatch.ElapsedTicks);
+            samples.Add(ToTimeSpanTicks(stopwatch.ElapsedTicks));
             widthSum += frame.Bitmap.Width;
         }
 
@@ -140,7 +140,7 @@ public class ScrubBenchmarks
             var stopwatch = Stopwatch.StartNew();
             var frame = await _videoSession!.GetFrameAsync(requestTime);
             stopwatch.Stop();
-            samples.Add(stopwatch.ElapsedTicks);
+            samples.Add(ToTimeSpanTicks(stopwatch.ElapsedTicks));
             widthSum += frame.Bitmap.Width;
         }
 
@@ -168,7 +168,7 @@ public class ScrubBenchmarks
                 var stopwatch = Stopwatch.StartNew();
                 var frame = await _videoSession!.GetFrameAsync(requestTime);
                 stopwatch.Stop();
-                samples.Add(stopwatch.ElapsedTicks);
+                samples.Add(ToTimeSpanTicks(stopwatch.ElapsedTicks));
                 widthSum += frame.Bitmap.Width;
             }
 
@@ -176,7 +176,7 @@ public class ScrubBenchmarks
             var seekStopwatch = Stopwatch.StartNew();
             var seekFrame = await _videoSession!.GetFrameAsync(currentTime);
             seekStopwatch.Stop();
-            samples.Add(seekStopwatch.ElapsedTicks);
+            samples.Add(ToTimeSpanTicks(seekStopwatch.ElapsedTicks));
             widthSum += seekFrame.Bitmap.Width;
             currentTime += _benchmarkFrameDuration;
         }
@@ -344,6 +344,11 @@ public class ScrubBenchmarks
     {
         Console.WriteLine(
             $"[{name}] count={stats.Count}, avg={stats.Average.TotalMilliseconds:F2}ms, p95={stats.P95.TotalMilliseconds:F2}ms, p99={stats.P99.TotalMilliseconds:F2}ms, max={stats.Max.TotalMilliseconds:F2}ms, over={stats.OverThreshold}");
+    }
+
+    private static long ToTimeSpanTicks(long stopwatchTicks)
+    {
+        return (long)(stopwatchTicks * (double)TimeSpan.TicksPerSecond / Stopwatch.Frequency);
     }
 
     private sealed record LatencyStats(

@@ -19,11 +19,13 @@ public class FFmpegDecodeSession : IDisposable
     private readonly int _height;
     private readonly double _framerate;
     private readonly IMediaAnalysis _mediaInfo;
+    private readonly BitmapPool _bitmapPool;
     private bool _disposed = false;
 
     public double Framerate => _framerate;
     public int Width => _width;
     public int Height => _height;
+    public TimeSpan Duration => _mediaInfo.Duration;
 
     public FFmpegDecodeSession(string videoPath)
     {
@@ -36,7 +38,7 @@ public class FFmpegDecodeSession : IDisposable
         _width = _mediaInfo.VideoStreams[0].Width;
         _height = _mediaInfo.VideoStreams[0].Height;
         _framerate = _mediaInfo.VideoStreams[0].FrameRate;
-
+        _bitmapPool = new BitmapPool(_width, _height);
     }
 
     /// <summary>
@@ -48,7 +50,7 @@ public class FFmpegDecodeSession : IDisposable
             time = TimeSpan.Zero;
         ObjectDisposedException.ThrowIf(_disposed, nameof(FFmpegDecodeSession));
 
-        using var sinkStream = new SingleFrameStream(_width, _height);
+        using var sinkStream = new SingleFrameStream(_width, _height, _bitmapPool);
 
         try
         {
@@ -78,7 +80,8 @@ public class FFmpegDecodeSession : IDisposable
             {
                 Path = _videoPath,
                 Time = time,
-                Bitmap = sinkStream.TakeBitmap()
+                Bitmap = sinkStream.TakeBitmap(),
+                BitmapReleaser = _bitmapPool.Return
             };
         }
         catch (Exception ex)
@@ -116,6 +119,7 @@ public class FFmpegDecodeSession : IDisposable
         await using var sinkStream = new FrameChunkStream(
             _width,
             _height,
+            _bitmapPool,
             _videoPath,
             startTime,
             _framerate,
@@ -157,6 +161,7 @@ public class FFmpegDecodeSession : IDisposable
         if (!_disposed)
         {
             _disposed = true;
+            _bitmapPool.Dispose();
         }
     }
 
