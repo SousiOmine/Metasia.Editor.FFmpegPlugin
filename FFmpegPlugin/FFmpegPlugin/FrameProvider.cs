@@ -19,6 +19,14 @@ public class FrameProvider : IDisposable
         return await session.GetFrameAsync(time);
     }
 
+    public async Task<FrameItem> GetFrameAsync(string path, int frame)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, nameof(FrameProvider));
+
+        var session = _sessions.GetOrAdd(path, p => new VideoSession(p));
+        return await session.GetFrameAsync(frame);
+    }
+
     public void Dispose()
     {
         if (!_disposed)

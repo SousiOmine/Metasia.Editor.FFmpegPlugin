@@ -49,6 +49,22 @@ public class VideoSession : IDisposable
         return singleFrame;
     }
 
+    public async Task<FrameItem> GetFrameAsync(int frame)
+    {
+        if (frame < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(frame), "フレーム番号は0以上である必要があります。");
+        }
+
+        if (_decodeSession.Framerate <= 0)
+        {
+            throw new InvalidOperationException("動画のフレームレートが不正です。");
+        }
+
+        var time = TimeSpan.FromSeconds(frame / _decodeSession.Framerate);
+        return await GetFrameAsync(time);
+    }
+
     private void TriggerPrefetchIfNeeded(TimeSpan currentTime)
     {
         // 前回のプリフェッチから十分離れていない場合はスキップ

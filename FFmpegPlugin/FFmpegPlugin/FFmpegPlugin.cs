@@ -1,18 +1,17 @@
 using System.Diagnostics;
-using System.Drawing;
 using System.Reflection;
 using FFMpegCore;
-using FFMpegCore.Extensions.SkiaSharp;
 using FFmpegPlugin.Decode;
 using Metasia.Core.Media;
 using Metasia.Editor.Plugin;
+using SkiaSharp;
 
 namespace FFmpegPlugin;
 
 public class FFmpegPlugin : IMediaInputPlugin, IDisposable
 {
     public string PluginIdentifier { get; } = "SousiOmine.FFmpegPlugin";
-    public string PluginVersion { get; } = "0.0.1";
+    public string PluginVersion { get; } = "0.0.2";
     public string PluginName { get; } = "FFmpegInput&Output";
 
     private readonly FrameProvider _frameProvider = new();
@@ -34,19 +33,19 @@ public class FFmpegPlugin : IMediaInputPlugin, IDisposable
         Console.WriteLine("Hello! from FFmpeg Plugin!");
     }
 
-    public async Task<VideoFileAccessorResult> GetBitmapAsync(string path, TimeSpan time)
+    public async Task<VideoFileAccessorResult> GetImageAsync(string path, TimeSpan time)
     {
         try
         {
-            Debug.WriteLine($"GetBitmapAsync呼び出し: {path}, {time}");
+            Debug.WriteLine($"GetImageAsync(TimeSpan)呼び出し: {path}, {time}");
 
             // 非同期的にフレームを取得
             FrameItem frame = await _frameProvider.GetFrameAsync(path, time);
-            var bitmap = frame.Bitmap;
+            var image = frame.GetImage();
 
-            if (bitmap.Width > 0 && bitmap.Height > 0)
+            if (image.Width > 0 && image.Height > 0)
             {
-                return new VideoFileAccessorResult() { IsSuccessful = true, Bitmap = bitmap };
+                return new VideoFileAccessorResult() { IsSuccessful = true, Image = image };
             }
             else
             {
@@ -55,18 +54,57 @@ public class FFmpegPlugin : IMediaInputPlugin, IDisposable
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"GetBitmapAsyncエラー: {ex.Message}");
+            Debug.WriteLine($"GetImageAsync(TimeSpan)エラー: {ex.Message}");
             return new VideoFileAccessorResult() { IsSuccessful = false };
         }
     }
 
-    public Task<ImageFileAccessorResult> GetBitmapAsync(string path)
+    public async Task<ImageFileAccessorResult> GetImageAsync(string path)
     {
-        throw new NotImplementedException();
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return new ImageFileAccessorResult { IsSuccessful = false };
+            }
+
+            using var bitmap = await Task.Run(() => SKBitmap.Decode(path));
+            if (bitmap is null || bitmap.Width <= 0 || bitmap.Height <= 0)
+            {
+                return new ImageFileAccessorResult { IsSuccessful = false };
+            }
+
+            var image = SKImage.FromBitmap(bitmap);
+            return new ImageFileAccessorResult { IsSuccessful = true, Image = image };
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"GetImageAsync(path)エラー: {ex.Message}");
+            return new ImageFileAccessorResult { IsSuccessful = false };
+        }
     }
-    public Task<VideoFileAccessorResult> GetBitmapAsync(string path, int frame)
+
+    public async Task<VideoFileAccessorResult> GetImageAsync(string path, int frame)
     {
-        throw new NotImplementedException();
+        try
+        {
+            Debug.WriteLine($"GetImageAsync(frame)呼び出し: {path}, {frame}");
+
+            FrameItem frameItem = await _frameProvider.GetFrameAsync(path, frame);
+            var image = frameItem.GetImage();
+
+            if (image.Width > 0 && image.Height > 0)
+            {
+                return new VideoFileAccessorResult { IsSuccessful = true, Image = image };
+            }
+
+            return new VideoFileAccessorResult { IsSuccessful = false };
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"GetImageAsync(frame)エラー: {ex.Message}");
+            return new VideoFileAccessorResult { IsSuccessful = false };
+        }
     }
     
     public void Dispose()
