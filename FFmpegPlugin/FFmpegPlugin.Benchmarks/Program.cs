@@ -10,7 +10,7 @@ var job = Job.Default
     .WithMinIterationTime(TimeInterval.FromMilliseconds(100))
     .WithUnrollFactor(1)
     .WithWarmupCount(1)
-    .WithIterationCount(2);
+    .WithIterationCount(1);
 
 var artifactsPath = Path.Combine(Directory.GetCurrentDirectory(), "BenchmarkDotNet.Artifacts");
 Environment.SetEnvironmentVariable("METASIA_BENCH_ARTIFACTS", artifactsPath);

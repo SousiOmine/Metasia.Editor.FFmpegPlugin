@@ -6,18 +6,18 @@ using FFMpegCore;
 
 public class ScrubBenchmarks
 {
-    private const int RandomSeekCount = 60;
+    private const int RandomSeekCount = 30;
     private const int NearSeekCount = 60;
-    private const int NearSeekOperationsPerInvoke = 256;
+    private const int NearSeekOperationsPerInvoke = 64;
     private const int RealtimeOperationsPerInvoke = 60;
     private static readonly TimeSpan SequentialDecodeWindow = TimeSpan.FromSeconds(0.5);
     private static readonly TimeSpan RealTimePlaybackWindow = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan SeekLatencyThreshold = TimeSpan.FromMilliseconds(50);
     private const double TargetFps = 60.0;
     private const int SeekLatencySampleCount = 30;
-    private const int RealtimeJankFrameCount = 120;
-    private const int ScenarioCycles = 3;
-    private const int ScenarioPlaybackFrames = 30;
+    private const int RealtimeJankFrameCount = 30;
+    private const int ScenarioCycles = 2;
+    private const int ScenarioPlaybackFrames = 15;
 
     private FFmpegDecodeSession? _decodeSession;
     private VideoSession? _videoSession;
