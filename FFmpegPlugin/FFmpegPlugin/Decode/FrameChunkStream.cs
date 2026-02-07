@@ -5,8 +5,6 @@ namespace FFmpegPlugin.Decode;
 
 public sealed class FrameChunkStream : Stream
 {
-    private readonly int _width;
-    private readonly int _height;
     private readonly int _frameSize;
     private readonly BitmapPool _bitmapPool;
     private readonly string _videoPath;
@@ -32,29 +30,11 @@ public sealed class FrameChunkStream : Stream
         ChannelWriter<FrameItem> writer,
         CancellationToken writeCancellationToken = default)
     {
-        if (width <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(width), "Width must be greater than 0.");
-        }
-
-        if (height <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(height), "Height must be greater than 0.");
-        }
-
         ArgumentNullException.ThrowIfNull(videoPath);
         ArgumentNullException.ThrowIfNull(bitmapPool);
         ArgumentNullException.ThrowIfNull(writer);
 
-        var frameSize = (long)width * height * 4;
-        if (frameSize > int.MaxValue)
-        {
-            throw new ArgumentOutOfRangeException(nameof(width), "Frame size is too large.");
-        }
-
-        _width = width;
-        _height = height;
-        _frameSize = (int)frameSize;
+        _frameSize = RawFrameBuffer.ResolveFrameSizeOrThrow(width, height);
         _bitmapPool = bitmapPool;
         _videoPath = videoPath;
         _startTime = startTime;
@@ -96,7 +76,7 @@ public sealed class FrameChunkStream : Stream
             while (count > 0)
             {
                 var writableBytes = Math.Min(count, _frameSize - _filledBytes);
-                CopyToBitmap(buffer, offset, IntPtr.Add(_currentPixels, _filledBytes), writableBytes);
+                RawFrameBuffer.CopyToUnmanaged(buffer, offset, IntPtr.Add(_currentPixels, _filledBytes), writableBytes);
 
                 _filledBytes += writableBytes;
                 offset += writableBytes;
@@ -141,7 +121,6 @@ public sealed class FrameChunkStream : Stream
             {
                 _completed = true;
                 _bitmapPool.Return(_currentBitmap);
-                _writer.TryComplete();
             }
 
             base.Dispose(disposing);
@@ -231,10 +210,4 @@ public sealed class FrameChunkStream : Stream
         return TimeSpan.FromSeconds(seconds);
     }
 
-    private static unsafe void CopyToBitmap(byte[] source, int sourceOffset, IntPtr destination, int count)
-    {
-        var sourceSpan = source.AsSpan(sourceOffset, count);
-        var destinationSpan = new Span<byte>((void*)destination, count);
-        sourceSpan.CopyTo(destinationSpan);
-    }
 }

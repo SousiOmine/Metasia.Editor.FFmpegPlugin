@@ -5,7 +5,7 @@ namespace FFmpegPlugin;
 
 public class FrameProvider : IDisposable
 {
-    private readonly ConcurrentDictionary<string, VideoSession> _sessions = new();
+    private readonly ConcurrentDictionary<string, VideoSession> _sessions = new(StringComparer.Ordinal);
     private bool _disposed = false;
 
     /// <summary>
@@ -15,16 +15,16 @@ public class FrameProvider : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, nameof(FrameProvider));
 
-        var session = _sessions.GetOrAdd(path, p => new VideoSession(p));
-        return await session.GetFrameAsync(time);
+        var session = GetOrCreateSession(path);
+        return await session.GetFrameAsync(time).ConfigureAwait(false);
     }
 
     public async Task<FrameItem> GetFrameAsync(string path, int frame)
     {
         ObjectDisposedException.ThrowIf(_disposed, nameof(FrameProvider));
 
-        var session = _sessions.GetOrAdd(path, p => new VideoSession(p));
-        return await session.GetFrameAsync(frame);
+        var session = GetOrCreateSession(path);
+        return await session.GetFrameAsync(frame).ConfigureAwait(false);
     }
 
     public void Dispose()
@@ -41,5 +41,10 @@ public class FrameProvider : IDisposable
             _sessions.Clear();
         }
         GC.SuppressFinalize(this);
+    }
+
+    private VideoSession GetOrCreateSession(string path)
+    {
+        return _sessions.GetOrAdd(path, static p => new VideoSession(p));
     }
 }

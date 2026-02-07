@@ -14,9 +14,13 @@ namespace FFmpegPlugin.Decode;
 /// </summary>
 public class FFmpegDecodeSession : IDisposable
 {
+    private const int MinPipeBlockSize = 256 * 1024;
+    private const int MaxPipeBlockSize = 8 * 1024 * 1024;
+    private const int DecodeChannelCapacity = 8;
     private readonly string _videoPath;
     private readonly int _width;
     private readonly int _height;
+    private readonly int _pipeBlockSize;
     private readonly double _framerate;
     private readonly IMediaAnalysis _mediaInfo;
     private readonly BitmapPool _bitmapPool;
@@ -37,8 +41,9 @@ public class FFmpegDecodeSession : IDisposable
 
         _width = _mediaInfo.VideoStreams[0].Width;
         _height = _mediaInfo.VideoStreams[0].Height;
+        _pipeBlockSize = ResolvePipeBlockSize(RawFrameBuffer.ResolveFrameSizeOrThrow(_width, _height));
         _framerate = _mediaInfo.VideoStreams[0].FrameRate;
-        _bitmapPool = new BitmapPool(_width, _height);
+        _bitmapPool = new BitmapPool(_width, _height, 64);
     }
 
     /// <summary>
@@ -59,12 +64,8 @@ public class FFmpegDecodeSession : IDisposable
                     .Seek(time)
                 )
                 .OutputToPipe(
-                    new StreamPipeSink(sinkStream),
-                    opt => opt
-                        .ForceFormat("rawvideo")
-                        .WithSpeedPreset(Speed.UltraFast)
-                        .WithCustomArgument("-pix_fmt bgra")
-                        .WithCustomArgument("-an -sn -dn")
+                    CreateRawVideoPipeSink(sinkStream),
+                    opt => ConfigureOutputOptions(opt)
                         .WithCustomArgument("-frames:v 1")
                 )
                 .CancellableThrough(cancellationToken)
@@ -108,13 +109,7 @@ public class FFmpegDecodeSession : IDisposable
         using var decodeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var decodeToken = decodeCts.Token;
 
-        var channel = Channel.CreateBounded<FrameItem>(new BoundedChannelOptions(8)
-        {
-            SingleReader = true,
-            SingleWriter = true,
-            AllowSynchronousContinuations = true,
-            FullMode = BoundedChannelFullMode.Wait
-        });
+        var channel = CreateDecodeChannel();
 
         await using var sinkStream = new FrameChunkStream(
             _width,
@@ -181,12 +176,8 @@ public class FFmpegDecodeSession : IDisposable
                     .Seek(startTime)
                 )
                 .OutputToPipe(
-                    new StreamPipeSink(sinkStream),
-                    opt => opt
-                        .ForceFormat("rawvideo")
-                        .WithSpeedPreset(Speed.UltraFast)
-                        .WithCustomArgument("-pix_fmt bgra")
-                        .WithCustomArgument("-an -sn -dn")
+                    CreateRawVideoPipeSink(sinkStream),
+                    opt => ConfigureOutputOptions(opt)
                         .WithCustomArgument($"-t {maxLengthStr}")
                 )
                 .CancellableThrough(decodeToken)
@@ -206,5 +197,44 @@ public class FFmpegDecodeSession : IDisposable
         {
             writer.TryComplete();
         }
+    }
+
+    private StreamPipeSink CreateRawVideoPipeSink(Stream sink)
+    {
+        var pipeSink = new StreamPipeSink(sink)
+        {
+            BlockSize = _pipeBlockSize
+        };
+        return pipeSink;
+    }
+
+    private static System.Threading.Channels.Channel<FrameItem> CreateDecodeChannel()
+    {
+        return Channel.CreateBounded<FrameItem>(new BoundedChannelOptions(DecodeChannelCapacity)
+        {
+            SingleReader = true,
+            SingleWriter = true,
+            AllowSynchronousContinuations = true,
+            FullMode = BoundedChannelFullMode.Wait
+        });
+    }
+
+    private static int ResolvePipeBlockSize(int frameSize)
+    {
+        if (frameSize <= 0)
+        {
+            return MinPipeBlockSize;
+        }
+
+        return (int)Math.Clamp(frameSize, MinPipeBlockSize, MaxPipeBlockSize);
+    }
+
+    private FFMpegArgumentOptions ConfigureOutputOptions(FFMpegArgumentOptions options)
+    {
+        return options
+            .ForceFormat("rawvideo")
+            .WithSpeedPreset(Speed.UltraFast)
+            .WithCustomArgument("-pix_fmt bgra")
+            .WithCustomArgument("-an -sn -dn");
     }
 }

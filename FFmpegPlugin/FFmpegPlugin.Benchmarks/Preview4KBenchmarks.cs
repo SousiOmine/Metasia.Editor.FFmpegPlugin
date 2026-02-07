@@ -8,10 +8,10 @@ using FFmpegPlugin.Decode;
 using FFMpegCore;
 
 [SimpleJob(RunStrategy.ColdStart, iterationCount: 1, warmupCount: 0, invocationCount: 1)]
-public class PreviewBenchmarks
+public class Preview4KBenchmarks
 {
     private const string ArtifactsPathEnvVar = "METASIA_BENCH_ARTIFACTS";
-    private static readonly TimeSpan LongPreviewWindow = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan PreviewWindow = TimeSpan.FromSeconds(12);
     private const double TargetFps = 60.0;
     private const int WarmupFrames = 12;
 
@@ -25,13 +25,13 @@ public class PreviewBenchmarks
     public void Setup()
     {
         var env = BenchmarkEnvironment.Resolve();
-        var videoPath = env.ResolveVideoPath(BenchmarkVideoProfile.Fhd);
+        var videoPath = env.ResolveVideoPath(BenchmarkVideoProfile.Uhd4K);
         var media = FFProbe.Analyse(videoPath);
 
         var duration = media.Duration;
         if (duration <= TimeSpan.Zero)
         {
-            throw new InvalidOperationException("動画の長さを取得できませんでした。");
+            throw new InvalidOperationException("4K動画の長さを取得できませんでした。");
         }
 
         _decodeSession = new FFmpegDecodeSession(videoPath);
@@ -48,8 +48,8 @@ public class PreviewBenchmarks
         _decodeSession?.Dispose();
     }
 
-    [Benchmark(Description = "Preview20s_Once")]
-    public async Task<int> Preview20s_Once()
+    [Benchmark(Description = "Preview4K12s_Once")]
+    public async Task<int> Preview4K12s_Once()
     {
         EnsureSessions();
 
@@ -58,10 +58,10 @@ public class PreviewBenchmarks
         var widthSum = 0;
         var samples = new List<PreviewSample>();
         var frameDurationTicks = _benchmarkFrameDuration.Ticks;
-        var previewWindow = _mediaDuration > TimeSpan.Zero && _mediaDuration < LongPreviewWindow
+        var window = _mediaDuration > TimeSpan.Zero && _mediaDuration < PreviewWindow
             ? _mediaDuration
-            : LongPreviewWindow;
-        var frameCount = (int)Math.Max(1, Math.Round(previewWindow.Ticks / (double)frameDurationTicks));
+            : PreviewWindow;
+        var frameCount = (int)Math.Max(1, Math.Round(window.Ticks / (double)frameDurationTicks));
 
         var scheduleStart = Stopwatch.GetTimestamp();
         for (var i = 0; i < frameCount; i++)
@@ -82,9 +82,9 @@ public class PreviewBenchmarks
             widthSum += frame.Bitmap.Width;
         }
 
-        WriteTimelineCsv("Preview20s_Once_Timeline", samples);
+        WriteTimelineCsv("Preview4K12s_Timeline", samples);
         Console.WriteLine(
-            $"[Preview20s_Once] fallbackSingleDecodeCount={_videoSession!.FallbackSingleDecodeCount}, workerRestartCount={_videoSession.WorkerRestartCount}");
+            $"[Preview4K12s_Once] fallbackSingleDecodeCount={_videoSession!.FallbackSingleDecodeCount}, workerRestartCount={_videoSession.WorkerRestartCount}");
         return widthSum;
     }
 
@@ -126,7 +126,7 @@ public class PreviewBenchmarks
     {
         if (_decodeSession is null || _videoSession is null)
         {
-            throw new InvalidOperationException("ベンチマーク初期化が完了していません。");
+            throw new InvalidOperationException("4Kベンチマーク初期化が完了していません。");
         }
     }
 
@@ -160,7 +160,7 @@ public class PreviewBenchmarks
 
     private static TimeSpan ResolvePreviewStartTime(TimeSpan duration)
     {
-        var maxStart = duration - LongPreviewWindow - TimeSpan.FromMilliseconds(100);
+        var maxStart = duration - PreviewWindow - TimeSpan.FromMilliseconds(100);
         if (maxStart < TimeSpan.Zero)
         {
             maxStart = TimeSpan.Zero;

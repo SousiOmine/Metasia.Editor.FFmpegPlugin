@@ -2,11 +2,13 @@ namespace FFmpegPlugin.Decode;
 
 internal sealed class SequentialDecodeWorker : IAsyncDisposable
 {
-    private static readonly TimeSpan DecodeChunkLength = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan TargetLookAhead = TimeSpan.FromSeconds(3.5);
+    private static readonly TimeSpan DefaultDecodeChunkLength = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan DefaultTargetLookAhead = TimeSpan.FromSeconds(2);
 
     private readonly FFmpegDecodeSession _decodeSession;
     private readonly TimeSpan _frameDuration;
+    private readonly TimeSpan _decodeChunkLength;
+    private readonly TimeSpan _targetLookAhead;
     private readonly Action<FrameItem> _onDecodedFrame;
     private readonly Action<Exception>? _onWorkerError;
     private readonly SemaphoreSlim _demandSignal = new(0, int.MaxValue);
@@ -24,7 +26,9 @@ internal sealed class SequentialDecodeWorker : IAsyncDisposable
         FFmpegDecodeSession decodeSession,
         TimeSpan frameDuration,
         Action<FrameItem> onDecodedFrame,
-        Action<Exception>? onWorkerError = null)
+        Action<Exception>? onWorkerError = null,
+        TimeSpan? decodeChunkLength = null,
+        TimeSpan? targetLookAhead = null)
     {
         ArgumentNullException.ThrowIfNull(decodeSession);
         ArgumentNullException.ThrowIfNull(onDecodedFrame);
@@ -32,7 +36,9 @@ internal sealed class SequentialDecodeWorker : IAsyncDisposable
         _decodeSession = decodeSession;
         _frameDuration = frameDuration > TimeSpan.Zero
             ? frameDuration
-            : TimeSpan.FromMilliseconds(16.666);
+            : DecodeTime.ResolveFrameDuration(0);
+        _decodeChunkLength = NormalizeDecodeChunkLength(decodeChunkLength);
+        _targetLookAhead = NormalizeTargetLookAhead(targetLookAhead, _decodeChunkLength, _frameDuration);
         _onDecodedFrame = onDecodedFrame;
         _onWorkerError = onWorkerError;
     }
@@ -268,7 +274,7 @@ internal sealed class SequentialDecodeWorker : IAsyncDisposable
                 _decodeCursor = _demandTime;
             }
 
-            var target = ClampTime(_demandTime + TargetLookAhead);
+            var target = ClampTime(_demandTime + _targetLookAhead);
             if (_decodedUntil != TimeSpan.MinValue && _decodedUntil >= target)
             {
                 return WorkItem.WaitForDemand;
@@ -282,7 +288,7 @@ internal sealed class SequentialDecodeWorker : IAsyncDisposable
             }
 
             var remaining = target - start;
-            var length = remaining < DecodeChunkLength ? remaining : DecodeChunkLength;
+            var length = remaining < _decodeChunkLength ? remaining : _decodeChunkLength;
             if (length <= TimeSpan.Zero)
             {
                 return WorkItem.WaitForDemand;
@@ -331,26 +337,32 @@ internal sealed class SequentialDecodeWorker : IAsyncDisposable
         }
     }
 
+    private static TimeSpan NormalizeDecodeChunkLength(TimeSpan? decodeChunkLength)
+    {
+        if (!decodeChunkLength.HasValue || decodeChunkLength.Value <= TimeSpan.Zero)
+        {
+            return DefaultDecodeChunkLength;
+        }
+
+        return decodeChunkLength.Value;
+    }
+
+    private static TimeSpan NormalizeTargetLookAhead(TimeSpan? targetLookAhead, TimeSpan decodeChunkLength, TimeSpan frameDuration)
+    {
+        if (!targetLookAhead.HasValue || targetLookAhead.Value <= TimeSpan.Zero)
+        {
+            return DefaultTargetLookAhead;
+        }
+
+        var minLookAhead = decodeChunkLength < frameDuration * 2
+            ? frameDuration * 2
+            : decodeChunkLength;
+        return targetLookAhead.Value < minLookAhead ? minLookAhead : targetLookAhead.Value;
+    }
+
     private TimeSpan ClampTime(TimeSpan time)
     {
-        if (time < TimeSpan.Zero)
-        {
-            return TimeSpan.Zero;
-        }
-
-        var duration = _decodeSession.Duration;
-        if (duration <= TimeSpan.Zero)
-        {
-            return time;
-        }
-
-        var max = duration - _frameDuration;
-        if (max <= TimeSpan.Zero)
-        {
-            return TimeSpan.Zero;
-        }
-
-        return time > max ? max : time;
+        return DecodeTime.ClampToMedia(time, _decodeSession.Duration, _frameDuration);
     }
 
     private void ThrowIfDisposed()

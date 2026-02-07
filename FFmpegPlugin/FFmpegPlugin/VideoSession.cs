@@ -8,6 +8,9 @@ public sealed class VideoSession : IDisposable
 {
     private static readonly TimeSpan WorkerRestartGap = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan SequentialWaitTimeout = TimeSpan.FromMilliseconds(45);
+    private const long DefaultCacheBudgetBytes = 768L * 1024 * 1024;
+    private const int MinAutoCacheFrames = 12;
+    private const int MaxAutoCacheFrames = 240;
 
     public readonly string Path;
 
@@ -27,28 +30,41 @@ public sealed class VideoSession : IDisposable
     private bool _workerNeedsRestart = true;
     private long _fallbackSingleDecodeCount;
     private long _workerRestartCount;
+    private int _sequentialFallbackStreak;
+    private int _workerPrimeInFlight;
     private bool _disposed;
 
     internal long FallbackSingleDecodeCount => Interlocked.Read(ref _fallbackSingleDecodeCount);
     internal long WorkerRestartCount => Interlocked.Read(ref _workerRestartCount);
 
-    public VideoSession(string videoPath, int maxCacheSize = 240)
+    public VideoSession(string videoPath, int maxCacheSize = 0)
     {
         Path = videoPath;
         _decodeSession = new FFmpegDecodeSession(videoPath);
 
-        _frameDuration = _decodeSession.Framerate > 0
-            ? TimeSpan.FromSeconds(1.0 / _decodeSession.Framerate)
-            : TimeSpan.FromMilliseconds(16.666);
-        _seekTolerance = ResolveSeekTolerance(_frameDuration);
+        _frameDuration = DecodeTime.ResolveFrameDuration(_decodeSession.Framerate);
+        _seekTolerance = DecodeTime.ResolveSeekTolerance(_frameDuration);
         _sequentialDeltaThreshold = _frameDuration * 10;
 
-        _frameCache = new FrameCache(maxCacheSize, _frameDuration);
+        var useLegacyTuning = maxCacheSize <= 0;
+        var resolvedCacheSize = useLegacyTuning
+            ? 240
+            : ResolveCacheSize(maxCacheSize, _decodeSession.Width, _decodeSession.Height);
+        var lookAhead = useLegacyTuning
+            ? TimeSpan.FromSeconds(3.5)
+            : ResolveTargetLookAhead(_frameDuration, resolvedCacheSize);
+        var chunkLength = useLegacyTuning
+            ? TimeSpan.FromSeconds(2)
+            : ResolveDecodeChunkLength(_frameDuration, lookAhead);
+
+        _frameCache = new FrameCache(resolvedCacheSize, _frameDuration);
         _decodeWorker = new SequentialDecodeWorker(
             _decodeSession,
             _frameDuration,
             OnWorkerFrameDecoded,
-            ex => Debug.WriteLine($"シーケンシャルデコードワーカーエラー: {ex.Message}"));
+            ex => Debug.WriteLine($"シーケンシャルデコードワーカーエラー: {ex.Message}"),
+            decodeChunkLength: chunkLength,
+            targetLookAhead: lookAhead);
     }
 
     public async Task<FrameItem> GetFrameAsync(TimeSpan time)
@@ -59,6 +75,7 @@ public sealed class VideoSession : IDisposable
 
         if (TryGetCachedFrame(requestTime, out var cached))
         {
+            ResetSequentialFallbackStreak();
             if (!isSequential)
             {
                 MarkWorkerRestartNeeded(requestTime);
@@ -75,7 +92,9 @@ public sealed class VideoSession : IDisposable
         if (!isSequential)
         {
             var seekFrame = await DecodeSingleFrameAndCacheAsync(requestTime, _lifetimeCts.Token).ConfigureAwait(false);
+            ResetSequentialFallbackStreak();
             MarkWorkerRestartNeeded(requestTime);
+            PrimeWorkerForPlayback(requestTime);
             UpdateRequestState(requestTime);
             return seekFrame;
         }
@@ -91,7 +110,17 @@ public sealed class VideoSession : IDisposable
 
         Interlocked.Increment(ref _fallbackSingleDecodeCount);
         var singleFrame = await DecodeSingleFrameAndCacheAsync(requestTime, _lifetimeCts.Token).ConfigureAwait(false);
-        UpdateWorkerDemand(requestTime);
+        var fallbackStreak = IncrementSequentialFallbackStreak();
+        if (fallbackStreak >= 4)
+        {
+            MarkWorkerRestartNeeded(requestTime);
+            await EnsureWorkerReadyAsync(requestTime).ConfigureAwait(false);
+            ResetSequentialFallbackStreak();
+        }
+        else
+        {
+            UpdateWorkerDemand(requestTime);
+        }
         UpdateRequestState(requestTime);
         return singleFrame;
     }
@@ -200,7 +229,7 @@ public sealed class VideoSession : IDisposable
         {
             if (_frameCache.Add(singleFrame))
             {
-                OnFrameAdded(singleFrame.Time);
+                OnFrameAdded(singleFrame.Time, producedByWorker: false);
                 return singleFrame;
             }
 
@@ -229,16 +258,19 @@ public sealed class VideoSession : IDisposable
             return;
         }
 
-        OnFrameAdded(frame.Time);
+        OnFrameAdded(frame.Time, producedByWorker: true);
     }
 
-    private void OnFrameAdded(TimeSpan frameTime)
+    private void OnFrameAdded(TimeSpan frameTime, bool producedByWorker)
     {
-        lock (_stateLock)
+        if (producedByWorker)
         {
-            if (frameTime > _workerDecodedUntil)
+            lock (_stateLock)
             {
-                _workerDecodedUntil = frameTime;
+                if (frameTime > _workerDecodedUntil)
+                {
+                    _workerDecodedUntil = frameTime;
+                }
             }
         }
 
@@ -289,6 +321,43 @@ public sealed class VideoSession : IDisposable
         }
     }
 
+    private void PrimeWorkerForPlayback(TimeSpan requestTime)
+    {
+        if (_lifetimeCts.IsCancellationRequested)
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref _workerPrimeInFlight, 1, 0) != 0)
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await EnsureWorkerReadyAsync(requestTime).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // cancellation race while restarting worker
+            }
+            catch (ObjectDisposedException)
+            {
+                // session disposed
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"バックグラウンドワーカープライム失敗: {ex.Message}");
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _workerPrimeInFlight, 0);
+            }
+        });
+    }
+
     private void UpdateWorkerDemand(TimeSpan requestTime)
     {
         lock (_stateLock)
@@ -296,12 +365,6 @@ public sealed class VideoSession : IDisposable
             if (_workerTargetTime == TimeSpan.MinValue || requestTime > _workerTargetTime)
             {
                 _workerTargetTime = requestTime;
-            }
-
-            var decodedUntil = _decodeWorker.DecodedUntil;
-            if (decodedUntil > _workerDecodedUntil)
-            {
-                _workerDecodedUntil = decodedUntil;
             }
         }
 
@@ -325,7 +388,6 @@ public sealed class VideoSession : IDisposable
     private bool ShouldRestartWorker(TimeSpan requestTime)
     {
         var isRunning = _decodeWorker.IsRunning;
-        var decodedUntil = _decodeWorker.DecodedUntil;
 
         lock (_stateLock)
         {
@@ -337,11 +399,6 @@ public sealed class VideoSession : IDisposable
             if (_workerTargetTime == TimeSpan.MinValue)
             {
                 return true;
-            }
-
-            if (decodedUntil > _workerDecodedUntil)
-            {
-                _workerDecodedUntil = decodedUntil;
             }
 
             if (_workerDecodedUntil == TimeSpan.MinValue)
@@ -362,35 +419,81 @@ public sealed class VideoSession : IDisposable
         }
     }
 
-    private TimeSpan ClampRequestTime(TimeSpan time)
+    private int IncrementSequentialFallbackStreak()
     {
-        if (time < TimeSpan.Zero)
+        lock (_stateLock)
         {
-            return TimeSpan.Zero;
+            _sequentialFallbackStreak++;
+            return _sequentialFallbackStreak;
         }
-
-        var duration = _decodeSession.Duration;
-        if (duration <= TimeSpan.Zero)
-        {
-            return time;
-        }
-
-        var maxTime = duration - _frameDuration;
-        if (maxTime <= TimeSpan.Zero)
-        {
-            return TimeSpan.Zero;
-        }
-
-        return time > maxTime ? maxTime : time;
     }
 
-    private static TimeSpan ResolveSeekTolerance(TimeSpan frameDuration)
+    private void ResetSequentialFallbackStreak()
+    {
+        lock (_stateLock)
+        {
+            _sequentialFallbackStreak = 0;
+        }
+    }
+
+    private TimeSpan ClampRequestTime(TimeSpan time)
+    {
+        return DecodeTime.ClampToMedia(time, _decodeSession.Duration, _frameDuration);
+    }
+
+    private static int ResolveCacheSize(int configuredSize, int width, int height)
+    {
+        if (configuredSize > 0)
+        {
+            return configuredSize;
+        }
+
+        var frameBytes = (long)width * height * 4;
+        if (frameBytes <= 0)
+        {
+            return 96;
+        }
+
+        var fhdFrameBytes = 1920L * 1080 * 4;
+        if (frameBytes <= fhdFrameBytes)
+        {
+            return MaxAutoCacheFrames;
+        }
+
+        var byBudget = (int)(DefaultCacheBudgetBytes / frameBytes);
+        return Math.Clamp(byBudget, MinAutoCacheFrames, 120);
+    }
+
+    private static TimeSpan ResolveTargetLookAhead(TimeSpan frameDuration, int cacheFrames)
     {
         if (frameDuration <= TimeSpan.Zero)
         {
-            return TimeSpan.FromMilliseconds(16.666);
+            return TimeSpan.FromSeconds(1);
         }
 
-        return TimeSpan.FromTicks(Math.Max(1, frameDuration.Ticks - 1));
+        if (cacheFrames >= 210)
+        {
+            return TimeSpan.FromSeconds(3.5);
+        }
+
+        var lookAheadFrames = Math.Clamp((int)Math.Round(cacheFrames * 0.8), 18, 180);
+        return frameDuration * lookAheadFrames;
+    }
+
+    private static TimeSpan ResolveDecodeChunkLength(TimeSpan frameDuration, TimeSpan lookAhead)
+    {
+        if (frameDuration <= TimeSpan.Zero)
+        {
+            return TimeSpan.FromMilliseconds(250);
+        }
+
+        if (lookAhead >= TimeSpan.FromSeconds(3.5))
+        {
+            return TimeSpan.FromSeconds(2);
+        }
+
+        var lookAheadFrames = Math.Max(1, (int)Math.Round(lookAhead.Ticks / (double)frameDuration.Ticks));
+        var chunkFrames = Math.Clamp(lookAheadFrames / 2, 8, 90);
+        return frameDuration * chunkFrames;
     }
 }

@@ -7,6 +7,9 @@
 1. `tools/ffmpeg/` に `ffmpeg.exe` と `ffprobe.exe` を配置 
    もしくは環境変数 `METASIA_FFMPEG_BIN_DIR` で配置先を指定
 2. ベンチマーク動画は `Assets/test_fhd_60fps_h264.mp4`
+3. 4Kベンチマークは `Assets/test_4k_60fps_h264.mp4` を使用
+   - 未配置時は `ffmpeg` で 4Kサンプル動画を自動生成
+   - 明示指定する場合は `METASIA_BENCH_VIDEO_4K` を設定
 
 ## 実行
 
@@ -28,6 +31,7 @@ dotnet run -c Release --project FFmpegPlugin.Benchmarks
 - `Realtime60fps_JankStats`: 60fps連続要求の遅延分布と閾値超過フレーム数を出力
 - `PlaybackAndSeekScenario`: 再生→シークを繰り返すシナリオの遅延分布を出力
 - `Preview20s_Once`: 約20秒のプレビュー再生を実時間(60fpsペース)で1回計測（CSVのみ保存）
+  - `VideoProfile=Fhd/Uhd4K` の2パターンを実行
   - タイムラインCSVは `BenchmarkDotNet.Artifacts/results` に保存され、保存先がログに表示される
   - CSV列は `frame,decode_ms,lateness_ms`
   - プレビュー用ベンチは単発ジョブで実行される

@@ -28,6 +28,7 @@ var previewConfig = ManualConfig
 
 RunBenchmarksWithFilterFallback<ScrubBenchmarks>(scrubConfig, args);
 RunBenchmarksWithFilterFallback<PreviewBenchmarks>(previewConfig, args);
+RunBenchmarksWithFilterFallback<Preview4KBenchmarks>(previewConfig, args);
 
 static void RunBenchmarksWithFilterFallback<TBenchmark>(IConfig config, string[] benchmarkArgs)
 {

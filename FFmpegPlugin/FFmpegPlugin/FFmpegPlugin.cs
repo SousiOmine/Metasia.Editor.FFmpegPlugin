@@ -39,18 +39,8 @@ public class FFmpegPlugin : IMediaInputPlugin, IDisposable
         {
             Debug.WriteLine($"GetImageAsync(TimeSpan)呼び出し: {path}, {time}");
 
-            // 非同期的にフレームを取得
-            FrameItem frame = await _frameProvider.GetFrameAsync(path, time);
-            var image = frame.GetImage();
-
-            if (image.Width > 0 && image.Height > 0)
-            {
-                return new VideoFileAccessorResult() { IsSuccessful = true, Image = image };
-            }
-            else
-            {
-                return new VideoFileAccessorResult() { IsSuccessful = false };
-            }
+            FrameItem frame = await _frameProvider.GetFrameAsync(path, time).ConfigureAwait(false);
+            return CreateVideoResult(frame.Bitmap);
         }
         catch (Exception ex)
         {
@@ -68,7 +58,7 @@ public class FFmpegPlugin : IMediaInputPlugin, IDisposable
                 return new ImageFileAccessorResult { IsSuccessful = false };
             }
 
-            using var bitmap = await Task.Run(() => SKBitmap.Decode(path));
+            using var bitmap = await Task.Run(() => SKBitmap.Decode(path)).ConfigureAwait(false);
             if (bitmap is null || bitmap.Width <= 0 || bitmap.Height <= 0)
             {
                 return new ImageFileAccessorResult { IsSuccessful = false };
@@ -90,15 +80,8 @@ public class FFmpegPlugin : IMediaInputPlugin, IDisposable
         {
             Debug.WriteLine($"GetImageAsync(frame)呼び出し: {path}, {frame}");
 
-            FrameItem frameItem = await _frameProvider.GetFrameAsync(path, frame);
-            var image = frameItem.GetImage();
-
-            if (image.Width > 0 && image.Height > 0)
-            {
-                return new VideoFileAccessorResult { IsSuccessful = true, Image = image };
-            }
-
-            return new VideoFileAccessorResult { IsSuccessful = false };
+            FrameItem frameItem = await _frameProvider.GetFrameAsync(path, frame).ConfigureAwait(false);
+            return CreateVideoResult(frameItem.Bitmap);
         }
         catch (Exception ex)
         {
@@ -109,7 +92,19 @@ public class FFmpegPlugin : IMediaInputPlugin, IDisposable
     
     public void Dispose()
     {
-        _frameProvider?.Dispose();
+        _frameProvider.Dispose();
         GC.SuppressFinalize(this);
+    }
+
+    private static VideoFileAccessorResult CreateVideoResult(SKBitmap bitmap)
+    {
+        var image = SKImage.FromBitmap(bitmap);
+        if (image.Width > 0 && image.Height > 0)
+        {
+            return new VideoFileAccessorResult { IsSuccessful = true, Image = image };
+        }
+
+        image.Dispose();
+        return new VideoFileAccessorResult { IsSuccessful = false };
     }
 }

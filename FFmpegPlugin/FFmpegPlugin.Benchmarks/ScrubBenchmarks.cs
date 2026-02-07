@@ -39,7 +39,8 @@ public class ScrubBenchmarks
     public void Setup()
     {
         var env = BenchmarkEnvironment.Resolve();
-        var media = FFProbe.Analyse(env.VideoPath);
+        var videoPath = env.ResolveVideoPath(BenchmarkVideoProfile.Fhd);
+        var media = FFProbe.Analyse(videoPath);
 
         var duration = media.Duration;
         if (duration <= TimeSpan.Zero)
@@ -47,8 +48,8 @@ public class ScrubBenchmarks
             throw new InvalidOperationException("動画の長さを取得できませんでした。");
         }
 
-        _decodeSession = new FFmpegDecodeSession(env.VideoPath);
-        _videoSession = new VideoSession(env.VideoPath);
+        _decodeSession = new FFmpegDecodeSession(videoPath);
+        _videoSession = new VideoSession(videoPath);
         _benchmarkFrameDuration = ResolveFrameDuration(_decodeSession.Framerate);
         _mediaDuration = duration;
 
