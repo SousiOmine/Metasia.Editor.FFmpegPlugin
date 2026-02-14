@@ -5,11 +5,11 @@ namespace FFmpegPlugin.Cache;
 public sealed class FrameCacheItem
 {
     public FrameItem Frame { get; }
-    public LinkedListNode<long> LruNode { get; }
+    public long QuantizedTicks { get; }
 
-    public FrameCacheItem(FrameItem frame, LinkedListNode<long> lruNode)
+    public FrameCacheItem(FrameItem frame, long quantizedTicks)
     {
         Frame = frame;
-        LruNode = lruNode;
+        QuantizedTicks = quantizedTicks;
     }
 }

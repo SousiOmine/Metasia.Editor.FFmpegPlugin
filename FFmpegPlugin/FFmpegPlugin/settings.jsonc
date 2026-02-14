@@ -1,0 +1,11 @@
+{
+  // FFmpegPlugin settings
+  "decode": {
+    // true: ハードウェアデコードを試行（失敗時はソフトウェアへフォールバック）
+    // false: 常にソフトウェアデコード
+    "hardwareDecode": true,
+    // 使用する HW デコード API:
+    // auto / d3d11va / cuda / qsv / dxva2 / vaapi / videotoolbox / vdpau / none
+    "hardwareDecodeApi": "auto"
+  }
+}

@@ -7,8 +7,8 @@ internal sealed class SequentialDecodeWorker : IAsyncDisposable
 
     private readonly FFmpegDecodeSession _decodeSession;
     private readonly TimeSpan _frameDuration;
-    private readonly TimeSpan _decodeChunkLength;
-    private readonly TimeSpan _targetLookAhead;
+    private TimeSpan _decodeChunkLength;
+    private TimeSpan _targetLookAhead;
     private readonly Action<FrameItem> _onDecodedFrame;
     private readonly Action<Exception>? _onWorkerError;
     private readonly SemaphoreSlim _demandSignal = new(0, int.MaxValue);
@@ -19,7 +19,6 @@ internal sealed class SequentialDecodeWorker : IAsyncDisposable
     private Task? _workerTask;
     private TimeSpan _demandTime = TimeSpan.MinValue;
     private TimeSpan _decodedUntil = TimeSpan.MinValue;
-    private TimeSpan _decodeCursor = TimeSpan.MinValue;
     private bool _disposed;
 
     internal SequentialDecodeWorker(
@@ -37,8 +36,11 @@ internal sealed class SequentialDecodeWorker : IAsyncDisposable
         _frameDuration = frameDuration > TimeSpan.Zero
             ? frameDuration
             : DecodeTime.ResolveFrameDuration(0);
-        _decodeChunkLength = NormalizeDecodeChunkLength(decodeChunkLength);
-        _targetLookAhead = NormalizeTargetLookAhead(targetLookAhead, _decodeChunkLength, _frameDuration);
+        var initialChunkLength = decodeChunkLength ?? DefaultDecodeChunkLength;
+        _decodeChunkLength = NormalizeDecodeChunkLength(initialChunkLength);
+
+        var initialLookAhead = targetLookAhead ?? DefaultTargetLookAhead;
+        _targetLookAhead = NormalizeTargetLookAhead(initialLookAhead, _decodeChunkLength, _frameDuration);
         _onDecodedFrame = onDecodedFrame;
         _onWorkerError = onWorkerError;
     }
@@ -70,11 +72,12 @@ internal sealed class SequentialDecodeWorker : IAsyncDisposable
         ThrowIfDisposed();
         var startTime = ClampTime(requestTime);
 
+        CancellationTokenSource? previousCts = null;
+        Task? previousTask = null;
+
         await _lifecycleLock.WaitAsync(sessionToken).ConfigureAwait(false);
         try
         {
-            CancellationTokenSource? previousCts;
-            Task? previousTask;
             CancellationTokenSource nextCts;
             Task nextTask;
 
@@ -86,41 +89,30 @@ internal sealed class SequentialDecodeWorker : IAsyncDisposable
                 nextCts = CancellationTokenSource.CreateLinkedTokenSource(sessionToken);
                 _workerCts = nextCts;
                 _demandTime = startTime;
-                _decodeCursor = startTime;
                 _decodedUntil = TimeSpan.MinValue;
-                nextTask = Task.Run(() => RunLoopAsync(nextCts.Token), CancellationToken.None);
+                nextTask = Task.Run(() => RunLoopAsync(startTime, nextCts.Token), CancellationToken.None);
                 _workerTask = nextTask;
             }
 
             SignalDemand();
-
-            if (previousCts is not null)
-            {
-                CancelSafely(previousCts);
-            }
-
-            if (previousTask is not null)
-            {
-                try
-                {
-                    await previousTask.ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    // previous worker cancellation
-                }
-                catch (Exception) when (previousCts?.IsCancellationRequested == true)
-                {
-                    // FFMpegCore cancellation race while restarting worker
-                }
-            }
-
-            previousCts?.Dispose();
         }
         finally
         {
             _lifecycleLock.Release();
         }
+
+        if (previousCts is not null)
+        {
+            CancelSafely(previousCts);
+        }
+
+        if (previousTask is not null)
+        {
+            _ = ObserveWorkerShutdownAsync(previousTask, previousCts);
+            return;
+        }
+
+        previousCts?.Dispose();
     }
 
     internal void UpdateDemand(TimeSpan requestTime)
@@ -142,6 +134,20 @@ internal sealed class SequentialDecodeWorker : IAsyncDisposable
         SignalDemand();
     }
 
+    internal void UpdateStrategy(TimeSpan decodeChunkLength, TimeSpan targetLookAhead)
+    {
+        var normalizedChunkLength = NormalizeDecodeChunkLength(decodeChunkLength);
+        var normalizedLookAhead = NormalizeTargetLookAhead(targetLookAhead, normalizedChunkLength, _frameDuration);
+
+        lock (_stateLock)
+        {
+            _decodeChunkLength = normalizedChunkLength;
+            _targetLookAhead = normalizedLookAhead;
+        }
+
+        SignalDemand();
+    }
+
     internal async Task StopAsync()
     {
         await _lifecycleLock.WaitAsync().ConfigureAwait(false);
@@ -155,7 +161,6 @@ internal sealed class SequentialDecodeWorker : IAsyncDisposable
                 task = _workerTask;
                 _workerCts = null;
                 _workerTask = null;
-                _decodeCursor = TimeSpan.MinValue;
                 _decodedUntil = TimeSpan.MinValue;
                 _demandTime = TimeSpan.MinValue;
             }
@@ -203,50 +208,38 @@ internal sealed class SequentialDecodeWorker : IAsyncDisposable
         _lifecycleLock.Dispose();
     }
 
-    private async Task RunLoopAsync(CancellationToken cancellationToken)
+    private async Task RunLoopAsync(TimeSpan startTime, CancellationToken cancellationToken)
     {
         try
         {
-            while (!cancellationToken.IsCancellationRequested)
+            await foreach (var frame in _decodeSession.DecodeContinuousAsync(startTime, cancellationToken))
             {
-                var workItem = BuildWorkItem();
-                if (workItem.ShouldWaitForDemand)
-                {
-                    await _demandSignal.WaitAsync(cancellationToken).ConfigureAwait(false);
-                    continue;
-                }
-
-                var lastDecodedFrame = TimeSpan.MinValue;
-                await foreach (var frame in _decodeSession.DecodeAsync(workItem.Start, workItem.Length, cancellationToken))
-                {
-                    _onDecodedFrame(frame);
-                    lastDecodedFrame = frame.Time;
-                }
+                _onDecodedFrame(frame);
 
                 lock (_stateLock)
                 {
-                    if (lastDecodedFrame != TimeSpan.MinValue)
+                    if (frame.Time > _decodedUntil)
                     {
-                        if (lastDecodedFrame > _decodedUntil)
-                        {
-                            _decodedUntil = lastDecodedFrame;
-                        }
-
-                        _decodeCursor = ClampTime(lastDecodedFrame + _frameDuration);
+                        _decodedUntil = frame.Time;
                     }
-                    else
+                }
+
+                while (true)
+                {
+                    var shouldWait = false;
+                    lock (_stateLock)
                     {
-                        var advanced = ClampTime(workItem.Start + workItem.Length);
-                        if (advanced > _decodeCursor)
-                        {
-                            _decodeCursor = advanced;
-                        }
-
-                        if (workItem.Start > _decodedUntil)
-                        {
-                            _decodedUntil = workItem.Start;
-                        }
+                        // Stop consuming the pipe when enough frames are buffered.
+                        // FFmpeg blocks on pipe write and the same process stays alive.
+                        shouldWait = ShouldWaitForDemandLocked();
                     }
+
+                    if (!shouldWait)
+                    {
+                        break;
+                    }
+
+                    await _demandSignal.WaitAsync(cancellationToken).ConfigureAwait(false);
                 }
             }
         }
@@ -260,57 +253,23 @@ internal sealed class SequentialDecodeWorker : IAsyncDisposable
         }
     }
 
-    private WorkItem BuildWorkItem()
+    private bool ShouldWaitForDemandLocked()
     {
-        lock (_stateLock)
+        if (_demandTime == TimeSpan.MinValue)
         {
-            if (_demandTime == TimeSpan.MinValue)
-            {
-                return WorkItem.WaitForDemand;
-            }
-
-            if (_decodeCursor == TimeSpan.MinValue)
-            {
-                _decodeCursor = _demandTime;
-            }
-
-            var target = ClampTime(_demandTime + _targetLookAhead);
-            if (_decodedUntil != TimeSpan.MinValue && _decodedUntil >= target)
-            {
-                return WorkItem.WaitForDemand;
-            }
-
-            var start = ClampTime(_decodeCursor);
-            if (start >= target)
-            {
-                _decodedUntil = target;
-                return WorkItem.WaitForDemand;
-            }
-
-            var remaining = target - start;
-            var length = remaining < _decodeChunkLength ? remaining : _decodeChunkLength;
-            if (length <= TimeSpan.Zero)
-            {
-                return WorkItem.WaitForDemand;
-            }
-
-            var duration = _decodeSession.Duration;
-            if (duration > TimeSpan.Zero)
-            {
-                var maxLength = duration - start;
-                if (maxLength <= TimeSpan.Zero)
-                {
-                    return WorkItem.WaitForDemand;
-                }
-
-                if (length > maxLength)
-                {
-                    length = maxLength;
-                }
-            }
-
-            return new WorkItem(start, length, ShouldWaitForDemand: false);
+            return true;
         }
+
+        if (_decodedUntil == TimeSpan.MinValue)
+        {
+            return false;
+        }
+
+        var effectiveLookAhead = _targetLookAhead < _decodeChunkLength
+            ? _decodeChunkLength
+            : _targetLookAhead;
+        var target = ClampTime(_demandTime + effectiveLookAhead);
+        return _decodedUntil >= target;
     }
 
     private void SignalDemand()
@@ -337,19 +296,43 @@ internal sealed class SequentialDecodeWorker : IAsyncDisposable
         }
     }
 
-    private static TimeSpan NormalizeDecodeChunkLength(TimeSpan? decodeChunkLength)
+    private async Task ObserveWorkerShutdownAsync(Task task, CancellationTokenSource? cts)
     {
-        if (!decodeChunkLength.HasValue || decodeChunkLength.Value <= TimeSpan.Zero)
+        try
+        {
+            await task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cts?.IsCancellationRequested == true)
+        {
+            // previous worker cancellation
+        }
+        catch (Exception) when (cts?.IsCancellationRequested == true)
+        {
+            // FFMpegCore cancellation race while restarting worker
+        }
+        catch (Exception ex)
+        {
+            _onWorkerError?.Invoke(ex);
+        }
+        finally
+        {
+            cts?.Dispose();
+        }
+    }
+
+    private static TimeSpan NormalizeDecodeChunkLength(TimeSpan decodeChunkLength)
+    {
+        if (decodeChunkLength <= TimeSpan.Zero)
         {
             return DefaultDecodeChunkLength;
         }
 
-        return decodeChunkLength.Value;
+        return decodeChunkLength;
     }
 
-    private static TimeSpan NormalizeTargetLookAhead(TimeSpan? targetLookAhead, TimeSpan decodeChunkLength, TimeSpan frameDuration)
+    private static TimeSpan NormalizeTargetLookAhead(TimeSpan targetLookAhead, TimeSpan decodeChunkLength, TimeSpan frameDuration)
     {
-        if (!targetLookAhead.HasValue || targetLookAhead.Value <= TimeSpan.Zero)
+        if (targetLookAhead <= TimeSpan.Zero)
         {
             return DefaultTargetLookAhead;
         }
@@ -357,7 +340,7 @@ internal sealed class SequentialDecodeWorker : IAsyncDisposable
         var minLookAhead = decodeChunkLength < frameDuration * 2
             ? frameDuration * 2
             : decodeChunkLength;
-        return targetLookAhead.Value < minLookAhead ? minLookAhead : targetLookAhead.Value;
+        return targetLookAhead < minLookAhead ? minLookAhead : targetLookAhead;
     }
 
     private TimeSpan ClampTime(TimeSpan time)
@@ -368,10 +351,5 @@ internal sealed class SequentialDecodeWorker : IAsyncDisposable
     private void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(_disposed, nameof(SequentialDecodeWorker));
-    }
-
-    private readonly record struct WorkItem(TimeSpan Start, TimeSpan Length, bool ShouldWaitForDemand)
-    {
-        internal static WorkItem WaitForDemand => new(TimeSpan.Zero, TimeSpan.Zero, true);
     }
 }

@@ -17,6 +17,18 @@ public class FFmpegDecodeSession : IDisposable
     private const int MinPipeBlockSize = 256 * 1024;
     private const int MaxPipeBlockSize = 8 * 1024 * 1024;
     private const int DecodeChannelCapacity = 8;
+    private static readonly HashSet<string> SupportedHwAccelApis = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "auto",
+        "none",
+        "vdpau",
+        "dxva2",
+        "d3d11va",
+        "vaapi",
+        "qsv",
+        "videotoolbox",
+        "cuda"
+    };
     private readonly string _videoPath;
     private readonly int _width;
     private readonly int _height;
@@ -55,35 +67,35 @@ public class FFmpegDecodeSession : IDisposable
             time = TimeSpan.Zero;
         ObjectDisposedException.ThrowIf(_disposed, nameof(FFmpegDecodeSession));
 
-        using var sinkStream = new SingleFrameStream(_width, _height, _bitmapPool);
-
         try
         {
-            await FFMpegArguments
-                .FromFileInput(_videoPath, true, opt => opt
-                    .Seek(time)
-                )
-                .OutputToPipe(
-                    CreateRawVideoPipeSink(sinkStream),
-                    opt => ConfigureOutputOptions(opt)
-                        .WithCustomArgument("-frames:v 1")
-                )
-                .CancellableThrough(cancellationToken)
-                .ProcessAsynchronously();
-
-            if (!sinkStream.HasFrame)
+            if (ResolveHardwareDecodeEnabled())
             {
-                Debug.WriteLine($"フレームの取得に失敗しました: {_videoPath}, {time}");
-                return null;
+                try
+                {
+                    var frame = await DecodeSingleFrameInternalAsync(time, useHardwareDecode: true, cancellationToken).ConfigureAwait(false);
+                    if (frame is not null)
+                    {
+                        return frame;
+                    }
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"HWデコード失敗。ソフトウェアにフォールバックします: {_videoPath}, {time}, {ex.Message}");
+                }
             }
 
-            return new FrameItem
+            var fallbackFrame = await DecodeSingleFrameInternalAsync(time, useHardwareDecode: false, cancellationToken).ConfigureAwait(false);
+            if (fallbackFrame is null)
             {
-                Path = _videoPath,
-                Time = time,
-                Bitmap = sinkStream.TakeBitmap(),
-                BitmapReleaser = _bitmapPool.Return
-            };
+                Debug.WriteLine($"フレームの取得に失敗しました: {_videoPath}, {time}");
+            }
+
+            return fallbackFrame;
         }
         catch (Exception ex)
         {
@@ -100,10 +112,36 @@ public class FFmpegDecodeSession : IDisposable
         TimeSpan maxLength,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        await foreach (var frame in DecodeInternalAsync(startTime, maxLength, cancellationToken).ConfigureAwait(false))
+        {
+            yield return frame;
+        }
+    }
+
+    /// <summary>
+    /// 1つのFFmpegプロセスで連続デコードする
+    /// </summary>
+    public async IAsyncEnumerable<FrameItem> DecodeContinuousAsync(
+        TimeSpan startTime,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        await foreach (var frame in DecodeInternalAsync(startTime, maxLength: null, cancellationToken).ConfigureAwait(false))
+        {
+            yield return frame;
+        }
+    }
+
+    private async IAsyncEnumerable<FrameItem> DecodeInternalAsync(
+        TimeSpan startTime,
+        TimeSpan? maxLength,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
         if (startTime < TimeSpan.Zero)
             startTime = TimeSpan.Zero;
-        if (maxLength < TimeSpan.Zero)
+        if (maxLength.HasValue && maxLength.Value < TimeSpan.Zero)
             maxLength = TimeSpan.Zero;
+        if (maxLength.HasValue && maxLength.Value == TimeSpan.Zero)
+            yield break;
         ObjectDisposedException.ThrowIf(_disposed, nameof(FFmpegDecodeSession));
 
         using var decodeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -162,26 +200,49 @@ public class FFmpegDecodeSession : IDisposable
 
     private async Task RunDecodeProcessAsync(
         TimeSpan startTime,
-        TimeSpan maxLength,
+        TimeSpan? maxLength,
         FrameChunkStream sinkStream,
         ChannelWriter<FrameItem> writer,
         CancellationToken decodeToken)
     {
         try
         {
-            var maxLengthStr = maxLength.TotalSeconds.ToString("F6", CultureInfo.InvariantCulture);
+            string? maxLengthStr = null;
+            if (maxLength.HasValue)
+            {
+                maxLengthStr = maxLength.Value.TotalSeconds.ToString("F6", CultureInfo.InvariantCulture);
+            }
 
-            await FFMpegArguments
-                .FromFileInput(_videoPath, true, opt => opt
-                    .Seek(startTime)
-                )
-                .OutputToPipe(
-                    CreateRawVideoPipeSink(sinkStream),
-                    opt => ConfigureOutputOptions(opt)
-                        .WithCustomArgument($"-t {maxLengthStr}")
-                )
-                .CancellableThrough(decodeToken)
-                .ProcessAsynchronously();
+            if (ResolveHardwareDecodeEnabled())
+            {
+                try
+                {
+                    await RunDecodePipelineAsync(
+                        startTime,
+                        maxLengthStr,
+                        sinkStream,
+                        decodeToken,
+                        useHardwareDecode: true,
+                        singleFrame: false).ConfigureAwait(false);
+                    return;
+                }
+                catch (OperationCanceledException) when (decodeToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"HWデコード失敗。ソフトウェアにフォールバックします: {_videoPath}, {startTime}, {ex.Message}");
+                }
+            }
+
+            await RunDecodePipelineAsync(
+                startTime,
+                maxLengthStr,
+                sinkStream,
+                decodeToken,
+                useHardwareDecode: false,
+                singleFrame: false).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (decodeToken.IsCancellationRequested)
         {
@@ -229,6 +290,81 @@ public class FFmpegDecodeSession : IDisposable
         return (int)Math.Clamp(frameSize, MinPipeBlockSize, MaxPipeBlockSize);
     }
 
+    private async Task<FrameItem?> DecodeSingleFrameInternalAsync(TimeSpan time, bool useHardwareDecode, CancellationToken cancellationToken)
+    {
+        using var sinkStream = new SingleFrameStream(_width, _height, _bitmapPool);
+        await RunDecodePipelineAsync(
+            time,
+            maxLengthStr: null,
+            sinkStream,
+            cancellationToken,
+            useHardwareDecode,
+            singleFrame: true).ConfigureAwait(false);
+
+        if (!sinkStream.HasFrame)
+        {
+            return null;
+        }
+
+        return new FrameItem
+        {
+            Path = _videoPath,
+            Time = time,
+            Bitmap = sinkStream.TakeBitmap(),
+            BitmapReleaser = _bitmapPool.Return
+        };
+    }
+
+    private async Task RunDecodePipelineAsync(
+        TimeSpan startTime,
+        string? maxLengthStr,
+        Stream sinkStream,
+        CancellationToken decodeToken,
+        bool useHardwareDecode,
+        bool singleFrame)
+    {
+        await FFMpegArguments
+            .FromFileInput(_videoPath, true, opt => ConfigureInputOptions(opt, startTime, useHardwareDecode))
+            .OutputToPipe(
+                CreateRawVideoPipeSink(sinkStream),
+                opt => ConfigureDecodeOutputOptions(opt, maxLengthStr, singleFrame))
+            .CancellableThrough(decodeToken)
+            .ProcessAsynchronously().ConfigureAwait(false);
+    }
+
+    private static FFMpegArgumentOptions ConfigureInputOptions(
+        FFMpegArgumentOptions options,
+        TimeSpan startTime,
+        bool useHardwareDecode)
+    {
+        options.Seek(startTime);
+        if (useHardwareDecode)
+        {
+            options.WithCustomArgument($"-hwaccel {ResolveHardwareDecodeApi()}");
+        }
+
+        return options;
+    }
+
+    private FFMpegArgumentOptions ConfigureDecodeOutputOptions(
+        FFMpegArgumentOptions options,
+        string? maxLengthStr,
+        bool singleFrame)
+    {
+        var configured = ConfigureOutputOptions(options);
+        if (singleFrame)
+        {
+            configured.WithCustomArgument("-frames:v 1");
+        }
+
+        if (!string.IsNullOrWhiteSpace(maxLengthStr))
+        {
+            configured.WithCustomArgument($"-t {maxLengthStr}");
+        }
+
+        return configured;
+    }
+
     private FFMpegArgumentOptions ConfigureOutputOptions(FFMpegArgumentOptions options)
     {
         return options
@@ -236,5 +372,36 @@ public class FFmpegDecodeSession : IDisposable
             .WithSpeedPreset(Speed.UltraFast)
             .WithCustomArgument("-pix_fmt bgra")
             .WithCustomArgument("-an -sn -dn");
+    }
+
+    private static bool ResolveHardwareDecodeEnabled()
+    {
+        var value = Environment.GetEnvironmentVariable(FFmpegPluginEnvironmentVariables.HardwareDecode);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return true;
+        }
+
+        return !value.Equals("0", StringComparison.OrdinalIgnoreCase)
+               && !value.Equals("false", StringComparison.OrdinalIgnoreCase)
+               && !value.Equals("off", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string ResolveHardwareDecodeApi()
+    {
+        var value = Environment.GetEnvironmentVariable(FFmpegPluginEnvironmentVariables.HardwareDecodeApi);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "auto";
+        }
+
+        var normalized = value.Trim().ToLowerInvariant();
+        if (SupportedHwAccelApis.Contains(normalized))
+        {
+            return normalized;
+        }
+
+        Debug.WriteLine($"未対応の HWデコードAPI '{value}' が指定されました。'auto' を使用します。");
+        return "auto";
     }
 }

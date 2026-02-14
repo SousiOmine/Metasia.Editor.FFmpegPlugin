@@ -6,11 +6,22 @@ namespace FFmpegPlugin;
 
 public sealed class VideoSession : IDisposable
 {
-    private static readonly TimeSpan WorkerRestartGap = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan SequentialWaitTimeout = TimeSpan.FromMilliseconds(45);
+    private static readonly TimeSpan RecoverySequentialWaitTimeout = TimeSpan.FromMilliseconds(120);
+    private static readonly TimeSpan CatchupWaitTimeout = TimeSpan.FromMilliseconds(120);
+    private static readonly TimeSpan MaxSpeedEstimationDelta = TimeSpan.FromSeconds(4);
+    private static readonly TimeSpan MinSequentialDeltaThreshold = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan MaxCatchupDelta = TimeSpan.FromSeconds(2.5);
     private const long DefaultCacheBudgetBytes = 768L * 1024 * 1024;
     private const int MinAutoCacheFrames = 12;
     private const int MaxAutoCacheFrames = 240;
+    private const int SequentialFallbackRestartThreshold = 2;
+    private const double SpeedSmoothingAlpha = 0.25;
+    private const double MinAdaptiveSpeed = 0.35;
+    private const double MaxAdaptiveSpeed = 4.0;
+    private const double HeadroomIncreaseFactor = 1.45;
+    private const double HeadroomReduceFactor = 0.85;
+    private const double StrategyUpdateThresholdMilliseconds = 18;
 
     public readonly string Path;
 
@@ -20,13 +31,23 @@ public sealed class VideoSession : IDisposable
     private readonly TimeSpan _seekTolerance;
     private readonly TimeSpan _frameDuration;
     private readonly TimeSpan _sequentialDeltaThreshold;
+    private readonly TimeSpan _baseDecodeChunkLength;
+    private readonly TimeSpan _baseTargetLookAhead;
+    private readonly TimeSpan _minDecodeChunkLength;
+    private readonly TimeSpan _maxDecodeChunkLength;
+    private readonly TimeSpan _minTargetLookAhead;
+    private readonly TimeSpan _maxTargetLookAhead;
     private readonly Lock _stateLock = new();
     private readonly SemaphoreSlim _frameArrivedSignal = new(0, int.MaxValue);
     private readonly CancellationTokenSource _lifetimeCts = new();
 
     private TimeSpan _lastRequestTime = TimeSpan.MinValue;
+    private long _lastRequestTimestamp;
     private TimeSpan _workerTargetTime = TimeSpan.MinValue;
     private TimeSpan _workerDecodedUntil = TimeSpan.MinValue;
+    private TimeSpan _currentDecodeChunkLength;
+    private TimeSpan _currentTargetLookAhead;
+    private double _smoothedRequestSpeed = 1.0;
     private bool _workerNeedsRestart = true;
     private long _fallbackSingleDecodeCount;
     private long _workerRestartCount;
@@ -44,7 +65,8 @@ public sealed class VideoSession : IDisposable
 
         _frameDuration = DecodeTime.ResolveFrameDuration(_decodeSession.Framerate);
         _seekTolerance = DecodeTime.ResolveSeekTolerance(_frameDuration);
-        _sequentialDeltaThreshold = _frameDuration * 10;
+        var sequentialThresholdTicks = Math.Max((_frameDuration * 10).Ticks, MinSequentialDeltaThreshold.Ticks);
+        _sequentialDeltaThreshold = TimeSpan.FromTicks(sequentialThresholdTicks);
 
         var useLegacyTuning = maxCacheSize <= 0;
         var resolvedCacheSize = useLegacyTuning
@@ -57,20 +79,42 @@ public sealed class VideoSession : IDisposable
             ? TimeSpan.FromSeconds(2)
             : ResolveDecodeChunkLength(_frameDuration, lookAhead);
 
+        var lookAheadFrames = _frameDuration > TimeSpan.Zero
+            ? Math.Max(1, (int)Math.Round(lookAhead.Ticks / (double)_frameDuration.Ticks))
+            : 60;
+        var chunkFrames = _frameDuration > TimeSpan.Zero
+            ? Math.Max(1, (int)Math.Round(chunkLength.Ticks / (double)_frameDuration.Ticks))
+            : 24;
+
+        var minLookAheadFrames = Math.Clamp((int)Math.Round(resolvedCacheSize * 0.18), 8, 72);
+        var maxLookAheadFrames = Math.Clamp((int)Math.Round(resolvedCacheSize * 0.9), 30, 220);
+        var minChunkFrames = Math.Clamp(minLookAheadFrames / 2, 6, 54);
+        var maxChunkFrames = Math.Clamp(maxLookAheadFrames / 2, 14, 120);
+
+        _minTargetLookAhead = _frameDuration * minLookAheadFrames;
+        _maxTargetLookAhead = _frameDuration * maxLookAheadFrames;
+        _minDecodeChunkLength = _frameDuration * minChunkFrames;
+        _maxDecodeChunkLength = _frameDuration * maxChunkFrames;
+        _baseTargetLookAhead = ClampTimeSpan(_frameDuration * lookAheadFrames, _minTargetLookAhead, _maxTargetLookAhead);
+        _baseDecodeChunkLength = ClampTimeSpan(_frameDuration * chunkFrames, _minDecodeChunkLength, _maxDecodeChunkLength);
+        _currentTargetLookAhead = _baseTargetLookAhead;
+        _currentDecodeChunkLength = _baseDecodeChunkLength;
+
         _frameCache = new FrameCache(resolvedCacheSize, _frameDuration);
         _decodeWorker = new SequentialDecodeWorker(
             _decodeSession,
             _frameDuration,
             OnWorkerFrameDecoded,
             ex => Debug.WriteLine($"シーケンシャルデコードワーカーエラー: {ex.Message}"),
-            decodeChunkLength: chunkLength,
-            targetLookAhead: lookAhead);
+            decodeChunkLength: _baseDecodeChunkLength,
+            targetLookAhead: _baseTargetLookAhead);
     }
 
     public async Task<FrameItem> GetFrameAsync(TimeSpan time)
     {
         ObjectDisposedException.ThrowIf(_disposed, nameof(VideoSession));
         var requestTime = ClampRequestTime(time);
+        var motion = CaptureRequestMotion(requestTime);
         var isSequential = IsLikelySequentialRequest(requestTime);
 
         if (TryGetCachedFrame(requestTime, out var cached))
@@ -78,11 +122,12 @@ public sealed class VideoSession : IDisposable
             ResetSequentialFallbackStreak();
             if (!isSequential)
             {
+                ResetMotionEstimate();
                 MarkWorkerRestartNeeded(requestTime);
             }
             else
             {
-                await EnsureWorkerReadyAsync(requestTime).ConfigureAwait(false);
+                await EnsureWorkerReadyAsync(requestTime, motion).ConfigureAwait(false);
             }
 
             UpdateRequestState(requestTime);
@@ -91,19 +136,35 @@ public sealed class VideoSession : IDisposable
 
         if (!isSequential)
         {
+            if (ShouldAttemptCatchup(motion))
+            {
+                MarkWorkerRestartNeeded(requestTime);
+                await EnsureWorkerReadyAsync(requestTime, motion).ConfigureAwait(false);
+
+                var catchupFrame = await WaitForCachedFrameAsync(requestTime, CatchupWaitTimeout, _lifetimeCts.Token).ConfigureAwait(false);
+                if (catchupFrame is not null)
+                {
+                    ResetSequentialFallbackStreak();
+                    UpdateRequestState(requestTime);
+                    return catchupFrame;
+                }
+            }
+
             var seekFrame = await DecodeSingleFrameAndCacheAsync(requestTime, _lifetimeCts.Token).ConfigureAwait(false);
             ResetSequentialFallbackStreak();
+            ResetMotionEstimate();
             MarkWorkerRestartNeeded(requestTime);
             PrimeWorkerForPlayback(requestTime);
             UpdateRequestState(requestTime);
             return seekFrame;
         }
 
-        await EnsureWorkerReadyAsync(requestTime).ConfigureAwait(false);
+        await EnsureWorkerReadyAsync(requestTime, motion).ConfigureAwait(false);
 
-        var cachedFrame = await WaitForCachedFrameAsync(requestTime, SequentialWaitTimeout, _lifetimeCts.Token).ConfigureAwait(false);
+        var cachedFrame = await WaitForCachedFrameAsync(requestTime, ResolveSequentialWaitTimeout(), _lifetimeCts.Token).ConfigureAwait(false);
         if (cachedFrame is not null)
         {
+            ResetSequentialFallbackStreak();
             UpdateRequestState(requestTime);
             return cachedFrame;
         }
@@ -111,10 +172,10 @@ public sealed class VideoSession : IDisposable
         Interlocked.Increment(ref _fallbackSingleDecodeCount);
         var singleFrame = await DecodeSingleFrameAndCacheAsync(requestTime, _lifetimeCts.Token).ConfigureAwait(false);
         var fallbackStreak = IncrementSequentialFallbackStreak();
-        if (fallbackStreak >= 4)
+        if (fallbackStreak >= SequentialFallbackRestartThreshold)
         {
             MarkWorkerRestartNeeded(requestTime);
-            await EnsureWorkerReadyAsync(requestTime).ConfigureAwait(false);
+            await EnsureWorkerReadyAsync(requestTime, motion).ConfigureAwait(false);
             ResetSequentialFallbackStreak();
         }
         else
@@ -295,8 +356,10 @@ public sealed class VideoSession : IDisposable
         await _decodeWorker.EnsureStartedAt(requestTime, _lifetimeCts.Token).ConfigureAwait(false);
     }
 
-    private async Task EnsureWorkerReadyAsync(TimeSpan requestTime)
+    private async Task EnsureWorkerReadyAsync(TimeSpan requestTime, RequestMotion motion = default)
     {
+        ApplyAdaptiveWorkerStrategy(requestTime, motion);
+
         var shouldRestart = false;
         lock (_stateLock)
         {
@@ -371,6 +434,149 @@ public sealed class VideoSession : IDisposable
         _decodeWorker.UpdateDemand(requestTime);
     }
 
+    private RequestMotion CaptureRequestMotion(TimeSpan requestTime)
+    {
+        var now = Stopwatch.GetTimestamp();
+        lock (_stateLock)
+        {
+            if (_lastRequestTime == TimeSpan.MinValue || _lastRequestTimestamp == 0)
+            {
+                return RequestMotion.None;
+            }
+
+            var delta = requestTime - _lastRequestTime;
+            if (delta.Duration() > MaxSpeedEstimationDelta)
+            {
+                _smoothedRequestSpeed = 1.0;
+                return new RequestMotion(delta, _smoothedRequestSpeed, HasSignal: false);
+            }
+
+            var elapsed = Stopwatch.GetElapsedTime(_lastRequestTimestamp, now);
+            if (elapsed <= TimeSpan.Zero || elapsed > TimeSpan.FromSeconds(1.2))
+            {
+                return new RequestMotion(delta, _smoothedRequestSpeed, HasSignal: false);
+            }
+
+            var instantSpeed = delta.TotalSeconds / elapsed.TotalSeconds;
+            if (!double.IsFinite(instantSpeed))
+            {
+                return new RequestMotion(delta, _smoothedRequestSpeed, HasSignal: false);
+            }
+
+            instantSpeed = Math.Clamp(instantSpeed, -MaxAdaptiveSpeed * 2, MaxAdaptiveSpeed * 2);
+            _smoothedRequestSpeed = (_smoothedRequestSpeed * (1 - SpeedSmoothingAlpha)) + (instantSpeed * SpeedSmoothingAlpha);
+            return new RequestMotion(delta, _smoothedRequestSpeed, HasSignal: true);
+        }
+    }
+
+    private void ApplyAdaptiveWorkerStrategy(TimeSpan requestTime, RequestMotion motion)
+    {
+        if (_frameDuration <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        var speed = motion.HasSignal
+            ? motion.SmoothedSpeed
+            : ReadSmoothedSpeed();
+
+        if (motion.HasSignal && motion.Delta < TimeSpan.Zero)
+        {
+            speed = MinAdaptiveSpeed;
+        }
+
+        var normalizedSpeed = Math.Clamp(Math.Abs(speed), MinAdaptiveSpeed, MaxAdaptiveSpeed);
+        var headroom = GetWorkerHeadroom(requestTime);
+
+        var headroomFactor = 1.0;
+        if (headroom <= _frameDuration * 8)
+        {
+            headroomFactor = HeadroomIncreaseFactor;
+        }
+        else if (headroom >= _baseTargetLookAhead * 1.4)
+        {
+            headroomFactor = HeadroomReduceFactor;
+        }
+
+        var lookAheadScale = normalizedSpeed * headroomFactor;
+        var chunkScale = normalizedSpeed * (headroomFactor > 1 ? 1.18 : 1.0);
+
+        var nextLookAhead = ClampTimeSpan(ScaleTimeSpan(_baseTargetLookAhead, lookAheadScale), _minTargetLookAhead, _maxTargetLookAhead);
+        var nextChunk = ClampTimeSpan(ScaleTimeSpan(_baseDecodeChunkLength, chunkScale), _minDecodeChunkLength, _maxDecodeChunkLength);
+        if (nextChunk > nextLookAhead)
+        {
+            nextChunk = nextLookAhead;
+        }
+
+        var shouldUpdate = false;
+        lock (_stateLock)
+        {
+            var chunkDelta = Math.Abs((_currentDecodeChunkLength - nextChunk).TotalMilliseconds);
+            var lookAheadDelta = Math.Abs((_currentTargetLookAhead - nextLookAhead).TotalMilliseconds);
+            if (chunkDelta >= StrategyUpdateThresholdMilliseconds || lookAheadDelta >= StrategyUpdateThresholdMilliseconds)
+            {
+                _currentDecodeChunkLength = nextChunk;
+                _currentTargetLookAhead = nextLookAhead;
+                shouldUpdate = true;
+            }
+        }
+
+        if (shouldUpdate)
+        {
+            _decodeWorker.UpdateStrategy(nextChunk, nextLookAhead);
+        }
+    }
+
+    private TimeSpan GetWorkerHeadroom(TimeSpan requestTime)
+    {
+        lock (_stateLock)
+        {
+            if (_workerDecodedUntil == TimeSpan.MinValue)
+            {
+                return TimeSpan.Zero;
+            }
+
+            var headroom = _workerDecodedUntil - requestTime;
+            return headroom > TimeSpan.Zero ? headroom : TimeSpan.Zero;
+        }
+    }
+
+    private double ReadSmoothedSpeed()
+    {
+        lock (_stateLock)
+        {
+            return _smoothedRequestSpeed;
+        }
+    }
+
+    private void ResetMotionEstimate()
+    {
+        lock (_stateLock)
+        {
+            _smoothedRequestSpeed = 1.0;
+        }
+    }
+
+    private TimeSpan ResolveSequentialWaitTimeout()
+    {
+        lock (_stateLock)
+        {
+            return _sequentialFallbackStreak > 0
+                ? RecoverySequentialWaitTimeout
+                : SequentialWaitTimeout;
+        }
+    }
+
+    private bool ShouldAttemptCatchup(RequestMotion motion)
+    {
+        if (!motion.HasSignal || motion.Delta <= _sequentialDeltaThreshold)
+        {
+            return false;
+        }
+
+        return motion.Delta <= MaxCatchupDelta;
+    }
+
     private bool IsLikelySequentialRequest(TimeSpan currentTime)
     {
         lock (_stateLock)
@@ -406,8 +612,9 @@ public sealed class VideoSession : IDisposable
                 return false;
             }
 
-            var gap = requestTime - _workerDecodedUntil;
-            return gap >= WorkerRestartGap;
+            // Keep a single persistent FFmpeg process during continuous playback.
+            // Explicit seek/non-sequential requests are handled by _workerNeedsRestart.
+            return false;
         }
     }
 
@@ -416,6 +623,7 @@ public sealed class VideoSession : IDisposable
         lock (_stateLock)
         {
             _lastRequestTime = time;
+            _lastRequestTimestamp = Stopwatch.GetTimestamp();
         }
     }
 
@@ -495,5 +703,36 @@ public sealed class VideoSession : IDisposable
         var lookAheadFrames = Math.Max(1, (int)Math.Round(lookAhead.Ticks / (double)frameDuration.Ticks));
         var chunkFrames = Math.Clamp(lookAheadFrames / 2, 8, 90);
         return frameDuration * chunkFrames;
+    }
+
+    private static TimeSpan ClampTimeSpan(TimeSpan value, TimeSpan min, TimeSpan max)
+    {
+        if (value < min)
+        {
+            return min;
+        }
+
+        if (value > max)
+        {
+            return max;
+        }
+
+        return value;
+    }
+
+    private static TimeSpan ScaleTimeSpan(TimeSpan value, double factor)
+    {
+        if (value <= TimeSpan.Zero || !double.IsFinite(factor) || factor <= 0)
+        {
+            return value;
+        }
+
+        var scaledTicks = (long)Math.Round(value.Ticks * factor);
+        return scaledTicks <= 0 ? TimeSpan.FromTicks(1) : TimeSpan.FromTicks(scaledTicks);
+    }
+
+    private readonly record struct RequestMotion(TimeSpan Delta, double SmoothedSpeed, bool HasSignal)
+    {
+        internal static RequestMotion None => new(TimeSpan.Zero, 1.0, false);
     }
 }

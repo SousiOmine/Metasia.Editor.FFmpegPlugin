@@ -7,14 +7,18 @@ public sealed class FrameCache : IDisposable
     private readonly int _maxCacheSize;
     private readonly long _quantizationTicks;
     private readonly Dictionary<long, FrameCacheItem> _frameCache = new();
-    private readonly LinkedList<long> _lruList = new();
+    // Fixed-size FIFO ring buffer for sequential preview playback.
+    private readonly FrameCacheItem?[] _ringBuffer;
     private readonly Lock _lockObject = new();
+    private int _head;
+    private int _count;
 
     public FrameCache(int maxCacheSize = 1000, TimeSpan? quantization = null)
     {
         _maxCacheSize = Math.Max(1, maxCacheSize);
         var quantizationTicks = quantization?.Ticks ?? TimeSpan.FromMilliseconds(10).Ticks;
         _quantizationTicks = Math.Max(1, quantizationTicks);
+        _ringBuffer = new FrameCacheItem[_maxCacheSize];
     }
 
     public FrameItem? TryGetFrame(TimeSpan time, TimeSpan seekTolerance)
@@ -53,8 +57,6 @@ public sealed class FrameCache : IDisposable
                 return null;
             }
 
-            _lruList.Remove(bestMatch.LruNode);
-            _lruList.AddFirst(bestMatch.LruNode);
             return bestMatch.Frame;
         }
     }
@@ -101,18 +103,26 @@ public sealed class FrameCache : IDisposable
                 return false;
             }
 
-            var node = _lruList.AddFirst(quantizedTicks);
-            var cacheItem = new FrameCacheItem(frame, node);
+            var cacheItem = new FrameCacheItem(frame, quantizedTicks);
             _frameCache[quantizedTicks] = cacheItem;
 
-            while (_frameCache.Count > _maxCacheSize && _lruList.Last is not null)
+            if (_count < _ringBuffer.Length)
             {
-                var evictionKey = _lruList.Last.Value;
-                _lruList.RemoveLast();
-                if (_frameCache.Remove(evictionKey, out var removedItem))
+                var insertIndex = (_head + _count) % _ringBuffer.Length;
+                _ringBuffer[insertIndex] = cacheItem;
+                _count++;
+            }
+            else
+            {
+                var evicted = _ringBuffer[_head];
+                if (evicted is not null)
                 {
-                    removedItem.Frame.Dispose();
+                    _frameCache.Remove(evicted.QuantizedTicks);
+                    evicted.Frame.Dispose();
                 }
+
+                _ringBuffer[_head] = cacheItem;
+                _head = (_head + 1) % _ringBuffer.Length;
             }
 
             return true;
@@ -129,7 +139,9 @@ public sealed class FrameCache : IDisposable
             }
 
             _frameCache.Clear();
-            _lruList.Clear();
+            Array.Clear(_ringBuffer, 0, _ringBuffer.Length);
+            _head = 0;
+            _count = 0;
         }
 
         GC.SuppressFinalize(this);

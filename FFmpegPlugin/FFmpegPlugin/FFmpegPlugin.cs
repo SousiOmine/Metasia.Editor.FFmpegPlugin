@@ -28,9 +28,19 @@ public class FFmpegPlugin : IMediaInputPlugin, IDisposable
     
     public void Initialize()
     {
-        string? pluginDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-        GlobalFFOptions.Configure(new FFOptions { BinaryFolder = Path.Combine(pluginDirectory!) });
-        Console.WriteLine("Hello! from FFmpeg Plugin!");
+        var pluginDirectory = ResolvePluginDirectory();
+        var settings = PluginSettings.Load(pluginDirectory);
+
+        GlobalFFOptions.Configure(new FFOptions { BinaryFolder = pluginDirectory });
+        Environment.SetEnvironmentVariable(
+            FFmpegPluginEnvironmentVariables.HardwareDecode,
+            settings.HardwareDecodeEnabled ? "1" : "0");
+        Environment.SetEnvironmentVariable(
+            FFmpegPluginEnvironmentVariables.HardwareDecodeApi,
+            settings.HardwareDecodeApi);
+
+        Debug.WriteLine(
+            $"FFmpeg Plugin initialized. settings={Path.Combine(pluginDirectory, PluginSettings.FileName)}, hwDecode={settings.HardwareDecodeEnabled}, hwDecodeApi={settings.HardwareDecodeApi}");
     }
 
     public async Task<VideoFileAccessorResult> GetImageAsync(string path, TimeSpan time)
@@ -106,5 +116,20 @@ public class FFmpegPlugin : IMediaInputPlugin, IDisposable
 
         image.Dispose();
         return new VideoFileAccessorResult { IsSuccessful = false };
+    }
+
+    private static string ResolvePluginDirectory()
+    {
+        var assemblyPath = Assembly.GetExecutingAssembly().Location;
+        if (!string.IsNullOrWhiteSpace(assemblyPath))
+        {
+            var directory = Path.GetDirectoryName(assemblyPath);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                return directory;
+            }
+        }
+
+        return AppContext.BaseDirectory;
     }
 }
