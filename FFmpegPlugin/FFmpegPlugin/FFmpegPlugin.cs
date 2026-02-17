@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Reflection;
+using Metasia.Core.Encode;
 using FFMpegCore;
 using FFmpegPlugin.Decode;
 using Metasia.Core.Media;
@@ -10,11 +11,13 @@ using SkiaSharp;
 
 namespace FFmpegPlugin;
 
-public class FFmpegPlugin : IMediaInputPlugin, IDisposable
+public class FFmpegPlugin : IMediaInputPlugin, IMediaOutputPlugin, IDisposable
 {
     public string PluginIdentifier { get; } = "SousiOmine.FFmpegPlugin";
     public string PluginVersion { get; } = "0.0.2";
     public string PluginName { get; } = "FFmpegInput&Output";
+    public string Name { get; } = "FFmpeg MP4";
+    public string[] SupportedExtensions { get; } = ["*.mp4"];
 
     private readonly FrameProvider _frameProvider = new();
     private string _pluginDirectory = AppContext.BaseDirectory;
@@ -202,6 +205,11 @@ public class FFmpegPlugin : IMediaInputPlugin, IDisposable
     {
         _frameProvider.Dispose();
         GC.SuppressFinalize(this);
+    }
+
+    public EncoderBase CreateEncoderInstance()
+    {
+        return new FFmpegOutputEncoder(_pluginDirectory);
     }
 
     private static VideoFileAccessorResult CreateVideoResult(SKBitmap bitmap)
