@@ -139,6 +139,39 @@ public class FFmpegPlugin : IMediaInputPlugin, IMediaOutputPlugin, IDisposable
         }
     }
     
+    public async Task<AudioSampleResult> GetAudioBySampleAsync(string path, long startSample, long sampleCount, int sampleRate)
+    {
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return new AudioSampleResult { IsSuccessful = false, Chunk = null };
+            }
+
+            string ffmpegPath = ResolveFfmpegExecutablePath(_pluginDirectory);
+            if (!File.Exists(ffmpegPath))
+            {
+                return new AudioSampleResult { IsSuccessful = false, Chunk = null };
+            }
+
+            AudioSession session = GetOrCreateAudioSession(path, ffmpegPath);
+            AudioChunk? chunk = await session.GetAudioBySampleAsync(startSample, sampleCount, sampleRate).ConfigureAwait(false);
+
+            return new AudioSampleResult
+            {
+                IsSuccessful = chunk is not null,
+                Chunk = chunk,
+                ActualStartSample = startSample,
+                ActualSampleCount = (int)(chunk?.Length ?? 0),
+            };
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"GetAudioBySampleAsyncエラー: {ex.Message}");
+            return new AudioSampleResult { IsSuccessful = false, Chunk = null };
+        }
+    }
+    
     public void Dispose()
     {
         _frameProvider.Dispose();

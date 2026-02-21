@@ -6,15 +6,15 @@ namespace FFmpegPlugin;
 
 internal sealed class AudioSession : IDisposable
 {
-    private const int TargetSampleRate = 44100;
     private const int TargetChannelCount = 2;
-    private const double CacheWindowSeconds = 4.0;
-    private const double CachePrerollSeconds = 0.15;
+    private const long CacheWindowSamples = 176400;
+    private const long CachePrerollSamples = 6615;
 
     private readonly object _sync = new();
     private readonly string _ffmpegPath;
     private readonly string _mediaPath;
     private bool _disposed;
+    private int _cachedSampleRate;
     private AudioChunkCache? _cache;
 
     public AudioSession(string ffmpegPath, string mediaPath)
@@ -25,35 +25,39 @@ internal sealed class AudioSession : IDisposable
 
     public async Task<AudioChunk?> GetAudioAsync(TimeSpan? startTime, TimeSpan? duration)
     {
+        int defaultSampleRate = 44100;
+        long startSample = (long)((startTime ?? TimeSpan.Zero).TotalSeconds * defaultSampleRate);
+        long sampleCount = duration.HasValue ? (long)(duration.Value.TotalSeconds * defaultSampleRate) : long.MaxValue;
+        
+        AudioChunk? chunk = await GetAudioBySampleAsync(startSample, sampleCount, defaultSampleRate).ConfigureAwait(false);
+        return chunk;
+    }
+    
+    public async Task<AudioChunk?> GetAudioBySampleAsync(long startSample, long sampleCount, int sampleRate)
+    {
         ObjectDisposedException.ThrowIf(_disposed, nameof(AudioSession));
 
-        double startSeconds = Math.Max(0, (startTime ?? TimeSpan.Zero).TotalSeconds);
-        double durationSeconds = duration.HasValue && duration.Value > TimeSpan.Zero
-            ? duration.Value.TotalSeconds
-            : 0;
-
-        if (durationSeconds <= 0)
+        if (startSample < 0)
         {
-            return await DecodeAudioAsync(startSeconds, null).ConfigureAwait(false);
+            startSample = 0;
         }
 
-        long requiredFrames = SecondsToFramesCeil(durationSeconds);
-        if (requiredFrames <= 0)
+        if (sampleCount <= 0)
         {
-            return new AudioChunk(new AudioFormat(TargetSampleRate, TargetChannelCount), 0);
+            return await DecodeAudioAsync(startSample, 0, sampleRate).ConfigureAwait(false);
         }
 
         lock (_sync)
         {
-            if (TryReadFromCache(startSeconds, requiredFrames, out AudioChunk? cached) && cached is not null)
+            if (_cache is not null && _cache.SampleRate == sampleRate && TryReadFromCache(startSample, sampleCount, out AudioChunk? cached) && cached is not null)
             {
                 return cached;
             }
         }
 
-        double windowStartSeconds = Math.Max(0, startSeconds - CachePrerollSeconds);
-        double windowDurationSeconds = Math.Max(CacheWindowSeconds, durationSeconds * 4.0);
-        AudioChunk? windowChunk = await DecodeAudioAsync(windowStartSeconds, windowDurationSeconds).ConfigureAwait(false);
+        long windowStartSample = Math.Max(0, startSample - CachePrerollSamples);
+        long windowSampleCount = Math.Max(CacheWindowSamples, sampleCount * 4);
+        AudioChunk? windowChunk = await DecodeAudioAsync(windowStartSample, windowSampleCount, sampleRate).ConfigureAwait(false);
         if (windowChunk is null)
         {
             return null;
@@ -62,8 +66,9 @@ internal sealed class AudioSession : IDisposable
         lock (_sync)
         {
             ObjectDisposedException.ThrowIf(_disposed, nameof(AudioSession));
-            _cache = new AudioChunkCache(windowStartSeconds, windowChunk);
-            return SliceChunk(windowChunk, windowStartSeconds, startSeconds, requiredFrames);
+            _cachedSampleRate = sampleRate;
+            _cache = new AudioChunkCache(windowStartSample, sampleRate, windowChunk);
+            return SliceChunk(windowChunk, windowStartSample, startSample, sampleCount);
         }
     }
 
@@ -73,7 +78,7 @@ internal sealed class AudioSession : IDisposable
         _cache = null;
     }
 
-    private bool TryReadFromCache(double requestStartSeconds, long requestFrames, out AudioChunk? chunk)
+    private bool TryReadFromCache(long requestStartSample, long requestSampleCount, out AudioChunk? chunk)
     {
         chunk = null;
         if (_cache is null)
@@ -81,28 +86,31 @@ internal sealed class AudioSession : IDisposable
             return false;
         }
 
-        long requestStartFrame = SecondsToFramesFloor(requestStartSeconds);
-        long requestEndFrame = requestStartFrame + requestFrames;
-        if (requestStartFrame < _cache.StartFrame || requestEndFrame > _cache.EndFrame)
+        long requestEndSample = requestStartSample + requestSampleCount;
+        if (requestStartSample < _cache.StartSample || requestEndSample > _cache.EndSample)
         {
             return false;
         }
 
-        chunk = SliceChunk(_cache.Chunk, _cache.WindowStartSeconds, requestStartSeconds, requestFrames);
+        chunk = SliceChunk(_cache.Chunk, _cache.StartSample, requestStartSample, requestSampleCount);
         return true;
     }
 
-    private async Task<AudioChunk?> DecodeAudioAsync(double startSeconds, double? durationSeconds)
+    private async Task<AudioChunk?> DecodeAudioAsync(long startSample, long sampleCount, int sampleRate)
     {
         if (!File.Exists(_ffmpegPath))
         {
             return null;
         }
 
+        double startSeconds = startSample / (double)sampleRate;
         string startArg = startSeconds.ToString("F6", CultureInfo.InvariantCulture);
-        string? durationArg = durationSeconds.HasValue
-            ? durationSeconds.Value.ToString("F6", CultureInfo.InvariantCulture)
-            : null;
+        string? durationArg = null;
+        if (sampleCount > 0 && sampleCount < long.MaxValue)
+        {
+            double durationSeconds = sampleCount / (double)sampleRate;
+            durationArg = durationSeconds.ToString("F6", CultureInfo.InvariantCulture);
+        }
 
         var psi = new ProcessStartInfo
         {
@@ -130,7 +138,7 @@ internal sealed class AudioSession : IDisposable
         psi.ArgumentList.Add("-ac");
         psi.ArgumentList.Add("2");
         psi.ArgumentList.Add("-ar");
-        psi.ArgumentList.Add("44100");
+        psi.ArgumentList.Add(sampleRate.ToString(CultureInfo.InvariantCulture));
         psi.ArgumentList.Add("pipe:1");
 
         using var process = new Process { StartInfo = psi };
@@ -150,35 +158,35 @@ internal sealed class AudioSession : IDisposable
         }
 
         byte[] bytes = output.ToArray();
-        int sampleCount = bytes.Length / sizeof(double);
-        if (sampleCount <= 0)
+        int sampleCountResult = bytes.Length / sizeof(double);
+        if (sampleCountResult <= 0)
         {
-            return new AudioChunk(new AudioFormat(TargetSampleRate, TargetChannelCount), 0);
+            return new AudioChunk(new AudioFormat(sampleRate, TargetChannelCount), 0);
         }
 
-        double[] samples = new double[sampleCount];
-        Buffer.BlockCopy(bytes, 0, samples, 0, sampleCount * sizeof(double));
-        return new AudioChunk(new AudioFormat(TargetSampleRate, TargetChannelCount), samples);
+        double[] samples = new double[sampleCountResult];
+        Buffer.BlockCopy(bytes, 0, samples, 0, sampleCountResult * sizeof(double));
+        return new AudioChunk(new AudioFormat(sampleRate, TargetChannelCount), samples);
     }
 
-    private static AudioChunk SliceChunk(AudioChunk source, double sourceStartSeconds, double requestStartSeconds, long requestFrames)
+    private static AudioChunk SliceChunk(AudioChunk source, long sourceStartSample, double requestStartSample, long requestSampleCount)
     {
-        var format = new AudioFormat(TargetSampleRate, TargetChannelCount);
-        var output = new AudioChunk(format, requestFrames);
+        var format = source.Format;
+        var output = new AudioChunk(format, requestSampleCount);
 
-        long sourceStartFrame = SecondsToFramesFloor(requestStartSeconds - sourceStartSeconds);
+        long sourceStartFrame = (long)requestStartSample - sourceStartSample;
         if (sourceStartFrame < 0)
         {
             sourceStartFrame = 0;
         }
 
-        long copyFrames = Math.Min(requestFrames, source.Length - sourceStartFrame);
+        long copyFrames = Math.Min(requestSampleCount, source.Length - sourceStartFrame);
         if (copyFrames <= 0)
         {
             return output;
         }
 
-        int channels = TargetChannelCount;
+        int channels = format.ChannelCount;
         for (long frame = 0; frame < copyFrames; frame++)
         {
             for (int ch = 0; ch < channels; ch++)
@@ -192,31 +200,11 @@ internal sealed class AudioSession : IDisposable
         return output;
     }
 
-    private static long SecondsToFramesFloor(double seconds)
+    private sealed class AudioChunkCache(long startSample, int sampleRate, AudioChunk chunk)
     {
-        if (!double.IsFinite(seconds) || seconds <= 0)
-        {
-            return 0;
-        }
-
-        return (long)Math.Floor(seconds * TargetSampleRate);
-    }
-
-    private static long SecondsToFramesCeil(double seconds)
-    {
-        if (!double.IsFinite(seconds) || seconds <= 0)
-        {
-            return 0;
-        }
-
-        return Math.Max(1, (long)Math.Ceiling(seconds * TargetSampleRate));
-    }
-
-    private sealed class AudioChunkCache(double windowStartSeconds, AudioChunk chunk)
-    {
-        public double WindowStartSeconds { get; } = windowStartSeconds;
+        public long StartSample { get; } = startSample;
+        public int SampleRate { get; } = sampleRate;
         public AudioChunk Chunk { get; } = chunk;
-        public long StartFrame => SecondsToFramesFloor(WindowStartSeconds);
-        public long EndFrame => StartFrame + Chunk.Length;
+        public long EndSample => StartSample + Chunk.Length;
     }
 }
