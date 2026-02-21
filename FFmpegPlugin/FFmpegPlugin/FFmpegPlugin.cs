@@ -1,6 +1,6 @@
 using System.Diagnostics;
-using System.Globalization;
 using System.Reflection;
+using System.Collections.Concurrent;
 using Metasia.Core.Encode;
 using FFMpegCore;
 using FFmpegPlugin.Decode;
@@ -20,6 +20,7 @@ public class FFmpegPlugin : IMediaInputPlugin, IMediaOutputPlugin, IDisposable
     public string[] SupportedExtensions { get; } = ["*.mp4"];
 
     private readonly FrameProvider _frameProvider = new();
+    private readonly ConcurrentDictionary<string, AudioSession> _audioSessions = new(StringComparer.OrdinalIgnoreCase);
     private string _pluginDirectory = AppContext.BaseDirectory;
     
     public IEnumerable<IEditorPlugin.SupportEnvironment> SupportedEnvironments { get; } = new[]
@@ -122,76 +123,13 @@ public class FFmpegPlugin : IMediaInputPlugin, IMediaOutputPlugin, IDisposable
                 return new AudioFileAccessorResult { IsSuccessful = false, Chunk = null };
             }
 
-            double startSeconds = Math.Max(0, (startTime ?? TimeSpan.Zero).TotalSeconds);
-            double? durationSeconds = duration.HasValue && duration.Value > TimeSpan.Zero ? duration.Value.TotalSeconds : null;
-
-            string startArg = startSeconds.ToString("F6", CultureInfo.InvariantCulture);
-            string? durationArg = durationSeconds.HasValue ? durationSeconds.Value.ToString("F6", CultureInfo.InvariantCulture) : null;
-
-            var psi = new ProcessStartInfo
-            {
-                FileName = ffmpegPath,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
-            };
-
-            psi.ArgumentList.Add("-ss");
-            psi.ArgumentList.Add(startArg);
-            psi.ArgumentList.Add("-i");
-            psi.ArgumentList.Add(path);
-            if (durationArg is not null)
-            {
-                psi.ArgumentList.Add("-t");
-                psi.ArgumentList.Add(durationArg);
-            }
-            psi.ArgumentList.Add("-vn");
-            psi.ArgumentList.Add("-f");
-            psi.ArgumentList.Add("f64le");
-            psi.ArgumentList.Add("-acodec");
-            psi.ArgumentList.Add("pcm_f64le");
-            psi.ArgumentList.Add("-ac");
-            psi.ArgumentList.Add("2");
-            psi.ArgumentList.Add("-ar");
-            psi.ArgumentList.Add("44100");
-            psi.ArgumentList.Add("pipe:1");
-
-            using var process = new Process { StartInfo = psi };
-
-            process.Start();
-
-            using var output = new MemoryStream();
-            Task stdoutTask = process.StandardOutput.BaseStream.CopyToAsync(output);
-            Task<string> stderrTask = process.StandardError.ReadToEndAsync();
-
-            await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
-            await process.WaitForExitAsync().ConfigureAwait(false);
-
-            if (process.ExitCode != 0)
-            {
-                Debug.WriteLine($"GetAudioAsync ffmpeg error: {stderrTask.Result}");
-                return new AudioFileAccessorResult { IsSuccessful = false, Chunk = null };
-            }
-
-            byte[] bytes = output.ToArray();
-            int sampleCount = bytes.Length / sizeof(double);
-            if (sampleCount <= 0)
-            {
-                return new AudioFileAccessorResult
-                {
-                    IsSuccessful = true,
-                    Chunk = new AudioChunk(new AudioFormat(44100, 2), 0),
-                };
-            }
-
-            double[] samples = new double[sampleCount];
-            Buffer.BlockCopy(bytes, 0, samples, 0, sampleCount * sizeof(double));
+            AudioSession session = GetOrCreateAudioSession(path, ffmpegPath);
+            AudioChunk? chunk = await session.GetAudioAsync(startTime, duration).ConfigureAwait(false);
 
             return new AudioFileAccessorResult
             {
-                IsSuccessful = true,
-                Chunk = new AudioChunk(new AudioFormat(44100, 2), samples),
+                IsSuccessful = chunk is not null,
+                Chunk = chunk,
             };
         }
         catch (Exception ex)
@@ -204,6 +142,7 @@ public class FFmpegPlugin : IMediaInputPlugin, IMediaOutputPlugin, IDisposable
     public void Dispose()
     {
         _frameProvider.Dispose();
+        DisposeAudioSessions();
         GC.SuppressFinalize(this);
     }
 
@@ -243,5 +182,20 @@ public class FFmpegPlugin : IMediaInputPlugin, IMediaOutputPlugin, IDisposable
     {
         string executableName = OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg";
         return Path.Combine(pluginDirectory, executableName);
+    }
+
+    private AudioSession GetOrCreateAudioSession(string mediaPath, string ffmpegPath)
+    {
+        return _audioSessions.GetOrAdd(mediaPath, _ => new AudioSession(ffmpegPath, mediaPath));
+    }
+
+    private void DisposeAudioSessions()
+    {
+        foreach (AudioSession session in _audioSessions.Values)
+        {
+            session.Dispose();
+        }
+
+        _audioSessions.Clear();
     }
 }
