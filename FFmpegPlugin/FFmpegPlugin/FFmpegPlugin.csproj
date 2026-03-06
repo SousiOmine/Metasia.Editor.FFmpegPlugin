@@ -13,9 +13,11 @@
   <ItemGroup>
     <Reference Include="Metasia.Editor.Plugin">
       <HintPath>$(MetasiaApplicationPath)\Metasia.Editor.Plugin.dll</HintPath>
+      <Private>false</Private>
     </Reference>
     <Reference Include="Metasia.Core">
       <HintPath>$(MetasiaApplicationPath)\Metasia.Core.dll</HintPath>
+      <Private>false</Private>
     </Reference>
 
   </ItemGroup>
@@ -23,7 +25,7 @@
   <ItemGroup>
     <PackageReference Include="FFMpegCore" Version="5.2.0" />
     <PackageReference Include="FFMpegCore.Extensions.SkiaSharp" Version="5.0.2" />
-    <PackageReference Include="SkiaSharp" Version="3.119.1" />
+    <PackageReference Include="SkiaSharp" Version="3.119.1" ExcludeAssets="runtime" />
   </ItemGroup>
 
   <ItemGroup>
