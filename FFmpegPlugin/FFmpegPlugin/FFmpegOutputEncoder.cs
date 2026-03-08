@@ -36,17 +36,19 @@ public sealed class FFmpegOutputEncoder : EncoderBase
     public string OutputPath { get; private set; } = string.Empty;
 
     private readonly string _pluginDirectory;
+    private readonly FFmpegOutputSettings _settings;
     private readonly object _processLock = new();
     private CancellationTokenSource _cts = new();
     private Task? _encodingTask;
     private Process? _ffmpegProcess;
     private double _projectFramerate = 30.0;
 
-    public FFmpegOutputEncoder(string pluginDirectory)
+    public FFmpegOutputEncoder(string pluginDirectory, FFmpegOutputSettings? settings = null)
     {
         _pluginDirectory = string.IsNullOrWhiteSpace(pluginDirectory)
             ? AppContext.BaseDirectory
             : pluginDirectory;
+        _settings = settings ?? FFmpegOutputSettings.Default;
     }
 
     public override void Initialize(
@@ -259,15 +261,18 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         psi.ArgumentList.Add("-c:v");
         psi.ArgumentList.Add("libx264");
         psi.ArgumentList.Add("-preset");
-        psi.ArgumentList.Add("veryfast");
+        psi.ArgumentList.Add(_settings.VideoPreset);
         psi.ArgumentList.Add("-pix_fmt");
         psi.ArgumentList.Add("yuv420p");
         psi.ArgumentList.Add("-c:a");
         psi.ArgumentList.Add("aac");
         psi.ArgumentList.Add("-b:a");
-        psi.ArgumentList.Add("192k");
-        psi.ArgumentList.Add("-movflags");
-        psi.ArgumentList.Add("+faststart");
+        psi.ArgumentList.Add(_settings.AudioBitrate);
+        if (_settings.EnableFastStart)
+        {
+            psi.ArgumentList.Add("-movflags");
+            psi.ArgumentList.Add("+faststart");
+        }
         psi.ArgumentList.Add("-shortest");
         psi.ArgumentList.Add(outputPath);
 

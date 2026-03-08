@@ -23,8 +23,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.3.6" />
+    <PackageReference Include="Avalonia.ReactiveUI" Version="11.3.6" />
     <PackageReference Include="FFMpegCore" Version="5.2.0" />
     <PackageReference Include="FFMpegCore.Extensions.SkiaSharp" Version="5.0.2" />
+    <PackageReference Include="ReactiveUI" Version="20.1.63" />
     <PackageReference Include="SkiaSharp" Version="3.119.1" ExcludeAssets="runtime" />
   </ItemGroup>
 

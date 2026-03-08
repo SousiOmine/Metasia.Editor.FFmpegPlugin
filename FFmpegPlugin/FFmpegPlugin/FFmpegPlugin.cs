@@ -179,9 +179,9 @@ public class FFmpegPlugin : IMediaInputPlugin, IMediaOutputPlugin, IDisposable
         GC.SuppressFinalize(this);
     }
 
-    public EncoderBase CreateEncoderInstance()
+    public IMediaOutputSession CreateSession()
     {
-        return new FFmpegOutputEncoder(_pluginDirectory);
+        return new FFmpegOutputSession(_pluginDirectory);
     }
 
     private static VideoFileAccessorResult CreateVideoResult(SKBitmap bitmap)
