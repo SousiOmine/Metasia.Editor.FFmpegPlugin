@@ -22,10 +22,10 @@
   </ItemGroup>
 
   <ItemGroup Condition="'$(UseLocalMetasiaSource)' == 'true'">
-    <ProjectReference Include="..\..\..\Metasia\Metasia.Editor.Plugin\Metasia.Editor.Plugin.csproj">
+    <ProjectReference Include="..\..\Metasia\Metasia.Editor.Plugin\Metasia.Editor.Plugin.csproj">
       <Private>false</Private>
     </ProjectReference>
-    <ProjectReference Include="..\..\..\Metasia\Metasia.Core\Metasia.Core.csproj">
+    <ProjectReference Include="..\..\Metasia\Metasia.Core\Metasia.Core.csproj">
       <Private>false</Private>
     </ProjectReference>
   </ItemGroup>

@@ -420,3 +420,4 @@ FodyWeavers.xsd
 .idea/.
 FFmpegPlugin/.idea/
 FFmpegPlugin/FFmpegPlugin.Benchmarks/Assets/test_4k_60fps_h264.mp4
+FFmpegPlugin/local.props
