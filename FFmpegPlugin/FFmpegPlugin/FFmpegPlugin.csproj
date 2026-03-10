@@ -6,20 +6,20 @@
     <Nullable>enable</Nullable>
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <UseLocalMetasiaSource>false</UseLocalMetasiaSource>
+    <MetasiaPackageVersion>0.1.1</MetasiaPackageVersion>
   </PropertyGroup>
 
   <Import Project="local.props" Condition="Exists('local.props')"/>
 
-  <ItemGroup>
-    <Reference Include="Metasia.Editor.Plugin">
-      <HintPath>$(MetasiaApplicationPath)\Metasia.Editor.Plugin.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="Metasia.Core">
-      <HintPath>$(MetasiaApplicationPath)\Metasia.Core.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
+  <ItemGroup Condition="'$(UseLocalMetasiaSource)' != 'true'">
+    <PackageReference Include="Metasia.Editor.Plugin" Version="$(MetasiaPackageVersion)" />
+    <PackageReference Include="Metasia.Core" Version="$(MetasiaPackageVersion)" />
+  </ItemGroup>
 
+  <ItemGroup Condition="'$(UseLocalMetasiaSource)' == 'true'">
+    <ProjectReference Include="..\..\..\Metasia\Metasia.Editor.Plugin\Metasia.Editor.Plugin.csproj" />
+    <ProjectReference Include="..\..\..\Metasia\Metasia.Core\Metasia.Core.csproj" />
   </ItemGroup>
 
   <ItemGroup>
