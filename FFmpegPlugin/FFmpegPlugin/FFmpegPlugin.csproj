@@ -13,22 +13,38 @@
   <Import Project="local.props" Condition="Exists('local.props')"/>
 
   <ItemGroup Condition="'$(UseLocalMetasiaSource)' != 'true'">
-    <PackageReference Include="Metasia.Editor.Plugin" Version="$(MetasiaPackageVersion)" />
-    <PackageReference Include="Metasia.Core" Version="$(MetasiaPackageVersion)" />
+    <PackageReference Include="Metasia.Editor.Plugin" Version="$(MetasiaPackageVersion)">
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
+    <PackageReference Include="Metasia.Core" Version="$(MetasiaPackageVersion)">
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
   </ItemGroup>
 
   <ItemGroup Condition="'$(UseLocalMetasiaSource)' == 'true'">
-    <ProjectReference Include="..\..\..\Metasia\Metasia.Editor.Plugin\Metasia.Editor.Plugin.csproj" />
-    <ProjectReference Include="..\..\..\Metasia\Metasia.Core\Metasia.Core.csproj" />
+    <ProjectReference Include="..\..\..\Metasia\Metasia.Editor.Plugin\Metasia.Editor.Plugin.csproj">
+      <Private>false</Private>
+    </ProjectReference>
+    <ProjectReference Include="..\..\..\Metasia\Metasia.Core\Metasia.Core.csproj">
+      <Private>false</Private>
+    </ProjectReference>
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Avalonia" Version="11.3.6" />
-    <PackageReference Include="Avalonia.ReactiveUI" Version="11.3.6" />
+    <PackageReference Include="Avalonia" Version="11.3.6">
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
+    <PackageReference Include="Avalonia.ReactiveUI" Version="11.3.6">
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
     <PackageReference Include="FFMpegCore" Version="5.2.0" />
     <PackageReference Include="FFMpegCore.Extensions.SkiaSharp" Version="5.0.2" />
-    <PackageReference Include="ReactiveUI" Version="20.1.63" />
-    <PackageReference Include="SkiaSharp" Version="3.119.1" ExcludeAssets="runtime" />
+    <PackageReference Include="ReactiveUI" Version="20.1.63">
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
+    <PackageReference Include="SkiaSharp" Version="3.119.1">
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
   </ItemGroup>
 
   <ItemGroup>
