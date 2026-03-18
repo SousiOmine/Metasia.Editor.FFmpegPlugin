@@ -7,7 +7,7 @@
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <UseLocalMetasiaSource>false</UseLocalMetasiaSource>
-    <MetasiaPackageVersion>0.1.1</MetasiaPackageVersion>
+    <MetasiaPackageVersion>0.2.0</MetasiaPackageVersion>
   </PropertyGroup>
 
   <Import Project="local.props" Condition="Exists('local.props')"/>
@@ -31,20 +31,18 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Avalonia" Version="11.3.6">
+    <PackageReference Include="Avalonia" Version="11.3.12">
       <ExcludeAssets>runtime</ExcludeAssets>
     </PackageReference>
-    <PackageReference Include="Avalonia.ReactiveUI" Version="11.3.6">
+    <PackageReference Include="ReactiveUI" Version="23.1.8">
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
+    <PackageReference Include="ReactiveUI.Avalonia" Version="11.4.12">
       <ExcludeAssets>runtime</ExcludeAssets>
     </PackageReference>
     <PackageReference Include="FFMpegCore" Version="5.2.0" />
     <PackageReference Include="FFMpegCore.Extensions.SkiaSharp" Version="5.0.2" />
-    <PackageReference Include="ReactiveUI" Version="20.1.63">
-      <ExcludeAssets>runtime</ExcludeAssets>
-    </PackageReference>
-    <PackageReference Include="SkiaSharp" Version="3.119.1">
-      <ExcludeAssets>runtime</ExcludeAssets>
-    </PackageReference>
+    
   </ItemGroup>
 
   <ItemGroup>

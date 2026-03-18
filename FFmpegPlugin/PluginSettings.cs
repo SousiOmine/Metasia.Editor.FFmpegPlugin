@@ -58,10 +58,32 @@ internal sealed class PluginSettings
         }
     }
 
+    internal void Save(string pluginDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(pluginDirectory))
+        {
+            return;
+        }
+
+        var settingsPath = Path.Combine(pluginDirectory, FileName);
+        try
+        {
+            var json = JsonSerializer.Serialize(this, new JsonSerializerOptions
+            {
+                WriteIndented = true
+            });
+            File.WriteAllText(settingsPath, json);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"settings.jsonc の保存に失敗しました: {settingsPath}, {ex.Message}");
+        }
+    }
+
     public sealed class DecodeSettings
     {
-        public bool? HardwareDecode { get; init; }
-        public string? HardwareDecodeApi { get; init; }
+        public bool? HardwareDecode { get; set; }
+        public string? HardwareDecodeApi { get; set; }
     }
 
     private static string NormalizeHardwareDecodeApi(string? api)

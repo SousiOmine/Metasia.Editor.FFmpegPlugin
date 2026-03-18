@@ -8,20 +8,23 @@ using Metasia.Core.Media;
 using Metasia.Core.Sounds;
 using Metasia.Editor.Plugin;
 using SkiaSharp;
+using Avalonia.Controls;
 
 namespace FFmpegPlugin;
 
-public class FFmpegPlugin : IMediaInputPlugin, IMediaOutputPlugin, IDisposable
+public class FFmpegPlugin : IMediaInputPlugin, IMediaOutputPlugin, IPluginSettingsProvider, IDisposable
 {
     public string PluginIdentifier { get; } = "SousiOmine.FFmpegPlugin";
-    public string PluginVersion { get; } = "0.0.2";
+    public string PluginVersion { get; } = "0.2.0";
     public string PluginName { get; } = "FFmpegInput&Output";
     public string Name { get; } = "FFmpeg MP4";
     public string[] SupportedExtensions { get; } = ["*.mp4"];
+    public string SettingsDisplayName { get; } = "FFmpegPlugin 設定";
 
     private readonly FrameProvider _frameProvider = new();
     private readonly ConcurrentDictionary<string, AudioSession> _audioSessions = new(StringComparer.OrdinalIgnoreCase);
     private string _pluginDirectory = AppContext.BaseDirectory;
+    private PluginSettings? _settings;
     
     public IEnumerable<IEditorPlugin.SupportEnvironment> SupportedEnvironments { get; } = new[]
     {
@@ -37,18 +40,24 @@ public class FFmpegPlugin : IMediaInputPlugin, IMediaOutputPlugin, IDisposable
     {
         var pluginDirectory = ResolvePluginDirectory();
         _pluginDirectory = pluginDirectory;
-        var settings = PluginSettings.Load(pluginDirectory);
+        _settings = PluginSettings.Load(pluginDirectory);
 
         GlobalFFOptions.Configure(new FFOptions { BinaryFolder = pluginDirectory });
         Environment.SetEnvironmentVariable(
             FFmpegPluginEnvironmentVariables.HardwareDecode,
-            settings.HardwareDecodeEnabled ? "1" : "0");
+            _settings.HardwareDecodeEnabled ? "1" : "0");
         Environment.SetEnvironmentVariable(
             FFmpegPluginEnvironmentVariables.HardwareDecodeApi,
-            settings.HardwareDecodeApi);
+            _settings.HardwareDecodeApi);
 
         Debug.WriteLine(
-            $"FFmpeg Plugin initialized. settings={Path.Combine(pluginDirectory, PluginSettings.FileName)}, hwDecode={settings.HardwareDecodeEnabled}, hwDecodeApi={settings.HardwareDecodeApi}");
+            $"FFmpeg Plugin initialized. settings={Path.Combine(pluginDirectory, PluginSettings.FileName)}, hwDecode={_settings.HardwareDecodeEnabled}, hwDecodeApi={_settings.HardwareDecodeApi}");
+    }
+
+    public Window CreateSettingsWindow()
+    {
+        _settings ??= PluginSettings.Load(_pluginDirectory);
+        return new FFmpegSettingsWindow(_settings, _pluginDirectory);
     }
 
     public async Task<VideoFileAccessorResult> GetImageAsync(string path, TimeSpan time)
