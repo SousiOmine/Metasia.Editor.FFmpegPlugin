@@ -7,23 +7,50 @@
              x:DataType="vm:FFmpegOutputSettingsViewModel"
              mc:Ignorable="d"
              d:DesignWidth="420"
-             d:DesignHeight="160">
+             d:DesignHeight="260">
     <StackPanel Spacing="8">
-        <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto" RowSpacing="8" ColumnSpacing="8">
-            <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="映像プリセット"/>
+        <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="8" ColumnSpacing="8">
+            <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="動画コーデック"/>
             <ComboBox Grid.Row="0" Grid.Column="1"
+                      ItemsSource="{Binding VideoCodecs}"
+                      SelectedValue="{Binding VideoCodec}"
+                      SelectedValueBinding="{Binding Value}"
+                      DisplayMemberBinding="{Binding DisplayName}"/>
+
+            <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Text="音声コーデック"/>
+            <ComboBox Grid.Row="1" Grid.Column="1"
+                      ItemsSource="{Binding AudioCodecs}"
+                      SelectedValue="{Binding AudioCodec}"
+                      SelectedValueBinding="{Binding Value}"
+                      DisplayMemberBinding="{Binding DisplayName}"/>
+
+            <TextBlock Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" Text="映像プリセット"/>
+            <ComboBox Grid.Row="2" Grid.Column="1"
                       ItemsSource="{Binding Presets}"
                       SelectedItem="{Binding VideoPreset}"/>
 
-            <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Text="音声ビットレート"/>
-            <ComboBox Grid.Row="1" Grid.Column="1"
+            <TextBlock Grid.Row="3" Grid.Column="0" VerticalAlignment="Center" Text="音声ビットレート"/>
+            <ComboBox Grid.Row="3" Grid.Column="1"
                       ItemsSource="{Binding AudioBitrates}"
                       SelectedItem="{Binding AudioBitrate}"/>
 
-            <TextBlock Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" Text="Fast Start"/>
-            <CheckBox Grid.Row="2" Grid.Column="1"
+            <TextBlock Grid.Row="4" Grid.Column="0" VerticalAlignment="Center" Text="Fast Start"/>
+            <CheckBox Grid.Row="4" Grid.Column="1"
                       Content="moov atom を先頭に配置"
                       IsChecked="{Binding EnableFastStart}"/>
+
+            <TextBlock Grid.Row="5" Grid.Column="0" VerticalAlignment="Center" Text="解像度"/>
+            <StackPanel Grid.Row="5" Grid.Column="1" Spacing="4">
+                <CheckBox Content="カスタム解像度を使用" IsChecked="{Binding UseCustomResolution}"/>
+
+                <TextBlock  VerticalAlignment="Center" Text="カスタム解像度"
+                        IsEnabled="{Binding UseCustomResolution}"/>
+                <StackPanel Orientation="Horizontal" Spacing="4" IsEnabled="{Binding UseCustomResolution}">
+                    <TextBox Text="{Binding CustomWidth}" Width="80" IsEnabled="{Binding UseCustomResolution}"/>
+                    <TextBlock Text=" × "/>
+                    <TextBox Text="{Binding CustomHeight}" Width="80" IsEnabled="{Binding UseCustomResolution}"/>
+                </StackPanel>
+            </StackPanel>
         </Grid>
     </StackPanel>
 </UserControl>

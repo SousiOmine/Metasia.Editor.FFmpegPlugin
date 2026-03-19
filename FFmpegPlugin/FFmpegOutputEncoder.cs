@@ -25,8 +25,8 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         @"time=(\d{2}:\d{2}:\d{2}(?:\.\d+)?)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    public string Name { get; } = "FFmpeg MP4";
-    public string[] SupportedExtensions { get; } = ["*.mp4"];
+    public string Name { get; } = "FFmpeg Video";
+    public string[] SupportedExtensions { get; } = ["*.mp4", "*.mkv", "*.mov"];
     public override double ProgressRate { get; protected set; }
 
     public override event EventHandler<EventArgs> StatusChanged = delegate { };
@@ -43,8 +43,10 @@ public sealed class FFmpegOutputEncoder : EncoderBase
     private Task? _encodingTask;
     private Process? _ffmpegProcess;
     private double _projectFramerate = 30.0;
-    private int _frameWidth;
-    private int _frameHeight;
+    private int _projectWidth;
+    private int _projectHeight;
+    private int _outputWidth;
+    private int _outputHeight;
 
     public FFmpegOutputEncoder(string pluginDirectory, FFmpegOutputSettings? settings = null)
     {
@@ -72,8 +74,10 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         }
 
         _projectFramerate = project.Info.Framerate;
-        _frameWidth = (int)project.Info.Size.Width;
-        _frameHeight = (int)project.Info.Size.Height;
+        _projectWidth = (int)project.Info.Size.Width;
+        _projectHeight = (int)project.Info.Size.Height;
+        _outputWidth = _settings.OutputWidth ?? _projectWidth;
+        _outputHeight = _settings.OutputHeight ?? _projectHeight;
     }
 
     public override void Start()
@@ -140,7 +144,7 @@ public sealed class FFmpegOutputEncoder : EncoderBase
             }
 
             await RenderAudioWavAsync(audioWavPath, cancellationToken).ConfigureAwait(false);
-            await MuxToMp4Async(audioWavPath, OutputPath, cancellationToken).ConfigureAwait(false);
+            await MuxAsync(audioWavPath, OutputPath, cancellationToken).ConfigureAwait(false);
 
             cancellationToken.ThrowIfCancellationRequested();
             ProgressRate = 1.0;
@@ -174,14 +178,14 @@ public sealed class FFmpegOutputEncoder : EncoderBase
             throw new InvalidOperationException("出力対象フレームがありません。");
         }
 
-        if (_frameWidth <= 0 || _frameHeight <= 0)
+        if (_projectWidth <= 0 || _projectHeight <= 0)
         {
-            throw new InvalidOperationException("出力解像度が不正です。");
+            throw new InvalidOperationException("プロジェクト解像度が不正です。");
         }
 
         int bytesPerPixel = 4;
-        int rowByteCount = checked(_frameWidth * bytesPerPixel);
-        int frameByteCount = checked(rowByteCount * _frameHeight);
+        int rowByteCount = checked(_projectWidth * bytesPerPixel);
+        int frameByteCount = checked(rowByteCount * _projectHeight);
         byte[] frameBuffer = ArrayPool<byte>.Shared.Rent(frameByteCount);
 
         var index = 0;
@@ -197,14 +201,14 @@ public sealed class FFmpegOutputEncoder : EncoderBase
                         throw new InvalidOperationException("フレームをビットマップに変換できませんでした。");
                     }
 
-                    if (bitmap.Width != _frameWidth || bitmap.Height != _frameHeight)
+                    if (bitmap.Width != _projectWidth || bitmap.Height != _projectHeight)
                     {
-                        throw new InvalidOperationException($"フレーム解像度が一致しません。expected={_frameWidth}x{_frameHeight}, actual={bitmap.Width}x{bitmap.Height}");
+                        throw new InvalidOperationException($"フレーム解像度が一致しません。expected={_projectWidth}x{_projectHeight}, actual={bitmap.Width}x{bitmap.Height}");
                     }
 
                     var pixelBytes = bitmap.GetPixelSpan();
                     var sourceRowBytes = bitmap.RowBytes;
-                    for (var y = 0; y < _frameHeight; y++)
+                    for (var y = 0; y < _projectHeight; y++)
                     {
                         var sourceOffset = y * sourceRowBytes;
                         var destinationOffset = y * rowByteCount;
@@ -267,7 +271,7 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         WriteWavHeader(writer, totalDataBytes);
     }
 
-    private async Task MuxToMp4Async(string audioWavPath, string outputPath, CancellationToken cancellationToken)
+    private async Task MuxAsync(string audioWavPath, string outputPath, CancellationToken cancellationToken)
     {
         var ffmpegPath = ResolveFfmpegExecutablePath(_pluginDirectory);
         if (!File.Exists(ffmpegPath))
@@ -275,13 +279,19 @@ public sealed class FFmpegOutputEncoder : EncoderBase
             throw new FileNotFoundException($"ffmpeg実行ファイルが見つかりません: {ffmpegPath}", ffmpegPath);
         }
 
-        if (_frameWidth <= 0 || _frameHeight <= 0)
+        if (_projectWidth <= 0 || _projectHeight <= 0)
+        {
+            throw new InvalidOperationException("プロジェクト解像度が不正です。");
+        }
+
+        if (_outputWidth <= 0 || _outputHeight <= 0)
         {
             throw new InvalidOperationException("出力解像度が不正です。");
         }
 
         var totalDuration = TimeSpan.FromSeconds(FrameCount / _projectFramerate);
         var framerateArg = _projectFramerate.ToString("0.######", CultureInfo.InvariantCulture);
+        var needScale = _projectWidth != _outputWidth || _projectHeight != _outputHeight;
 
         var psi = new ProcessStartInfo
         {
@@ -298,28 +308,53 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         psi.ArgumentList.Add("-pixel_format");
         psi.ArgumentList.Add("bgra");
         psi.ArgumentList.Add("-video_size");
-        psi.ArgumentList.Add($"{_frameWidth}x{_frameHeight}");
+        psi.ArgumentList.Add($"{_projectWidth}x{_projectHeight}");
         psi.ArgumentList.Add("-framerate");
         psi.ArgumentList.Add(framerateArg);
         psi.ArgumentList.Add("-i");
         psi.ArgumentList.Add("pipe:0");
         psi.ArgumentList.Add("-i");
         psi.ArgumentList.Add(audioWavPath);
+
         psi.ArgumentList.Add("-c:v");
-        psi.ArgumentList.Add("libx264");
-        psi.ArgumentList.Add("-preset");
-        psi.ArgumentList.Add(_settings.VideoPreset);
+        psi.ArgumentList.Add(_settings.VideoCodec);
+
+        if (_settings.VideoCodec == "libx264" || _settings.VideoCodec == "libx265")
+        {
+            psi.ArgumentList.Add("-preset");
+            psi.ArgumentList.Add(_settings.VideoPreset);
+        }
+
+        if (_settings.VideoCodec == "libaom-av1")
+        {
+            psi.ArgumentList.Add("-cpu-used");
+            psi.ArgumentList.Add("4");
+        }
+
+        if (needScale)
+        {
+            psi.ArgumentList.Add("-vf");
+            psi.ArgumentList.Add($"scale={_outputWidth}:{_outputHeight}");
+        }
+
         psi.ArgumentList.Add("-pix_fmt");
         psi.ArgumentList.Add("yuv420p");
+
         psi.ArgumentList.Add("-c:a");
-        psi.ArgumentList.Add("aac");
+        psi.ArgumentList.Add(_settings.AudioCodec);
         psi.ArgumentList.Add("-b:a");
         psi.ArgumentList.Add(_settings.AudioBitrate);
+
         if (_settings.EnableFastStart)
         {
-            psi.ArgumentList.Add("-movflags");
-            psi.ArgumentList.Add("+faststart");
+            var containerFormat = GetContainerFormatFromPath(outputPath);
+            if (containerFormat == "mp4" || containerFormat == "mov")
+            {
+                psi.ArgumentList.Add("-movflags");
+                psi.ArgumentList.Add("+faststart");
+            }
         }
+
         psi.ArgumentList.Add("-shortest");
         psi.ArgumentList.Add(outputPath);
 
@@ -528,5 +563,17 @@ public sealed class FFmpegOutputEncoder : EncoderBase
     {
         var executableName = OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg";
         return Path.Combine(pluginDirectory, executableName);
+    }
+
+    private static string GetContainerFormatFromPath(string outputPath)
+    {
+        var extension = Path.GetExtension(outputPath).ToLowerInvariant();
+        return extension switch
+        {
+            ".mp4" => "mp4",
+            ".mkv" => "mkv",
+            ".mov" => "mov",
+            _ => "mp4"
+        };
     }
 }

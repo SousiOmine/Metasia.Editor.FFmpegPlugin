@@ -4,8 +4,8 @@ namespace FFmpegPlugin;
 
 public sealed class FFmpegOutputSession : IMediaOutputSession
 {
-    public string Name => "FFmpeg MP4";
-    public string[] SupportedExtensions => ["*.mp4"];
+    public string Name => "FFmpeg Video";
+    public string[] SupportedExtensions => ["*.mp4", "*.mkv", "*.mov"];
     public Avalonia.Controls.Control? SettingsView { get; }
 
     private readonly FFmpegOutputSettingsViewModel _viewModel;

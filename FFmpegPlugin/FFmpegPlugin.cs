@@ -17,8 +17,8 @@ public class FFmpegPlugin : IMediaInputPlugin, IMediaOutputPlugin, IPluginSettin
     public string PluginIdentifier { get; } = "SousiOmine.FFmpegPlugin";
     public string PluginVersion { get; } = "0.2.0";
     public string PluginName { get; } = "FFmpegInput&Output";
-    public string Name { get; } = "FFmpeg MP4";
-    public string[] SupportedExtensions { get; } = ["*.mp4"];
+    public string Name { get; } = "FFmpeg Video";
+    public string[] SupportedExtensions { get; } = ["*.mp4", "*.mkv", "*.mov"];
     public string SettingsDisplayName { get; } = "FFmpegPlugin 設定";
 
     private readonly FrameProvider _frameProvider = new();
