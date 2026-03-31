@@ -26,7 +26,7 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     public string Name { get; } = "FFmpeg Video";
-    public string[] SupportedExtensions { get; } = ["*.mp4", "*.mkv", "*.mov"];
+    public string[] SupportedExtensions { get; } = ["*.mp4", "*.mkv", "*.mov", "*.avi"];
     public override double ProgressRate { get; protected set; }
 
     public override event EventHandler<EventArgs> StatusChanged = delegate { };
@@ -159,7 +159,7 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"FFmpeg MP4出力失敗: {ex}");
+            Debug.WriteLine($"FFmpeg出力失敗: {ex}");
             Status = IEncoder.EncoderState.Failed;
             StatusChanged.Invoke(this, EventArgs.Empty);
             EncodeFailed.Invoke(this, EventArgs.Empty);
@@ -289,6 +289,10 @@ public sealed class FFmpegOutputEncoder : EncoderBase
             throw new InvalidOperationException("出力解像度が不正です。");
         }
 
+        var containerFormat = GetContainerFormatFromPath(outputPath);
+        var effectiveSettings = _settings.ResolveForContainer(containerFormat);
+        LogEffectiveSettingsIfAdjusted(containerFormat, effectiveSettings);
+
         var totalDuration = TimeSpan.FromSeconds(FrameCount / _projectFramerate);
         var framerateArg = _projectFramerate.ToString("0.######", CultureInfo.InvariantCulture);
         var needScale = _projectWidth != _outputWidth || _projectHeight != _outputHeight;
@@ -317,15 +321,15 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         psi.ArgumentList.Add(audioWavPath);
 
         psi.ArgumentList.Add("-c:v");
-        psi.ArgumentList.Add(_settings.VideoCodec);
+        psi.ArgumentList.Add(effectiveSettings.VideoCodec);
 
-        if (_settings.VideoCodec == "libx264" || _settings.VideoCodec == "libx265")
+        if (effectiveSettings.VideoCodec == "libx264" || effectiveSettings.VideoCodec == "libx265")
         {
             psi.ArgumentList.Add("-preset");
-            psi.ArgumentList.Add(_settings.VideoPreset);
+            psi.ArgumentList.Add(effectiveSettings.VideoPreset);
         }
 
-        if (_settings.VideoCodec == "libaom-av1")
+        if (effectiveSettings.VideoCodec == "libaom-av1")
         {
             psi.ArgumentList.Add("-cpu-used");
             psi.ArgumentList.Add("4");
@@ -341,14 +345,13 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         psi.ArgumentList.Add("yuv420p");
 
         psi.ArgumentList.Add("-c:a");
-        psi.ArgumentList.Add(_settings.AudioCodec);
+        psi.ArgumentList.Add(effectiveSettings.AudioCodec);
         psi.ArgumentList.Add("-b:a");
-        psi.ArgumentList.Add(_settings.AudioBitrate);
+        psi.ArgumentList.Add(effectiveSettings.AudioBitrate);
 
-        if (_settings.EnableFastStart)
+        if (effectiveSettings.EnableFastStart)
         {
-            var containerFormat = GetContainerFormatFromPath(outputPath);
-            if (containerFormat == "mp4" || containerFormat == "mov")
+            if (containerFormat == FFmpegOutputContainer.Mp4 || containerFormat == FFmpegOutputContainer.Mov)
             {
                 psi.ArgumentList.Add("-movflags");
                 psi.ArgumentList.Add("+faststart");
@@ -565,15 +568,32 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         return Path.Combine(pluginDirectory, executableName);
     }
 
-    private static string GetContainerFormatFromPath(string outputPath)
+    private void LogEffectiveSettingsIfAdjusted(FFmpegOutputContainer container, FFmpegOutputSettings effectiveSettings)
+    {
+        if (container != FFmpegOutputContainer.Avi)
+        {
+            return;
+        }
+
+        if (_settings == effectiveSettings)
+        {
+            return;
+        }
+
+        Debug.WriteLine(
+            $"AVI出力のためFFmpeg設定を補正しました。video={_settings.VideoCodec}->{effectiveSettings.VideoCodec}, audio={_settings.AudioCodec}->{effectiveSettings.AudioCodec}, faststart={_settings.EnableFastStart}->{effectiveSettings.EnableFastStart}");
+    }
+
+    private static FFmpegOutputContainer GetContainerFormatFromPath(string outputPath)
     {
         var extension = Path.GetExtension(outputPath).ToLowerInvariant();
         return extension switch
         {
-            ".mp4" => "mp4",
-            ".mkv" => "mkv",
-            ".mov" => "mov",
-            _ => "mp4"
+            ".mp4" => FFmpegOutputContainer.Mp4,
+            ".mkv" => FFmpegOutputContainer.Mkv,
+            ".mov" => FFmpegOutputContainer.Mov,
+            ".avi" => FFmpegOutputContainer.Avi,
+            _ => FFmpegOutputContainer.Mp4
         };
     }
 }
