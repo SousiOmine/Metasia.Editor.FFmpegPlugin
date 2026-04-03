@@ -7,12 +7,15 @@
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <UseLocalMetasiaSource>false</UseLocalMetasiaSource>
-    <MetasiaPackageVersion>0.2.0</MetasiaPackageVersion>
+    <MetasiaPackageVersion>0.3.0</MetasiaPackageVersion>
   </PropertyGroup>
 
   <Import Project="local.props" Condition="Exists('local.props')"/>
 
   <ItemGroup Condition="'$(UseLocalMetasiaSource)' != 'true'">
+    <PackageReference Include="Metasia.Editor.Abstractions" Version="$(MetasiaPackageVersion)">
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
     <PackageReference Include="Metasia.Editor.Plugin" Version="$(MetasiaPackageVersion)">
       <ExcludeAssets>runtime</ExcludeAssets>
     </PackageReference>
@@ -22,6 +25,9 @@
   </ItemGroup>
 
   <ItemGroup Condition="'$(UseLocalMetasiaSource)' == 'true'">
+    <ProjectReference Include="..\..\Metasia\Metasia.Editor.Abstractions\Metasia.Editor.Abstractions.csproj">
+      <Private>false</Private>
+    </ProjectReference>
     <ProjectReference Include="..\..\Metasia\Metasia.Editor.Plugin\Metasia.Editor.Plugin.csproj">
       <Private>false</Private>
     </ProjectReference>

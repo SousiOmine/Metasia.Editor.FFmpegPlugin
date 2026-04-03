@@ -6,6 +6,7 @@ using FFMpegCore;
 using FFmpegPlugin.Decode;
 using Metasia.Core.Media;
 using Metasia.Core.Sounds;
+using Metasia.Editor.Abstractions.Hosting;
 using Metasia.Editor.Plugin;
 using SkiaSharp;
 using Avalonia.Controls;
@@ -15,7 +16,7 @@ namespace FFmpegPlugin;
 public class FFmpegPlugin : IMediaInputPlugin, IMediaOutputPlugin, IPluginSettingsProvider, IDisposable
 {
     public string PluginIdentifier { get; } = "SousiOmine.FFmpegPlugin";
-    public string PluginVersion { get; } = "0.2.0";
+    public string PluginVersion { get; } = "0.4.0";
     public string PluginName { get; } = "FFmpegInput&Output";
     public string Name { get; } = "FFmpeg Video";
     public string[] SupportedExtensions { get; } = ["*.mp4", "*.mkv", "*.mov", "*.avi"];
@@ -36,7 +37,7 @@ public class FFmpegPlugin : IMediaInputPlugin, IMediaOutputPlugin, IPluginSettin
         IEditorPlugin.SupportEnvironment.Linux_x64,
     };
     
-    public void Initialize()
+    public void Initialize(IEditorHostContext hostContext)
     {
         var pluginDirectory = ResolvePluginDirectory();
         _pluginDirectory = pluginDirectory;
