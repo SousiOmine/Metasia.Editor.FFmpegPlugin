@@ -16,7 +16,7 @@ namespace FFmpegPlugin;
 public class FFmpegPlugin : IMediaInputPlugin, IMediaOutputPlugin, IPluginSettingsProvider, IDisposable
 {
     public string PluginIdentifier { get; } = "SousiOmine.FFmpegPlugin";
-    public string PluginVersion { get; } = "0.4.0";
+    public string PluginVersion { get; } = "0.5.0";
     public string PluginName { get; } = "FFmpegInput&Output";
     public string Name { get; } = "FFmpeg Video";
     public string[] SupportedExtensions { get; } = ["*.mp4", "*.mkv", "*.mov", "*.avi"];
