@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Buffers;
+using SkiaSharp;
 using Metasia.Core.Encode;
 using Metasia.Core.Media;
 using Metasia.Core.Objects;
@@ -194,32 +195,59 @@ public sealed class FFmpegOutputEncoder : EncoderBase
             await foreach (var frame in GetFramesAsync(0, FrameCount - 1, cancellationToken).ConfigureAwait(false))
             {
                 using (frame)
-                using (var bitmap = SkiaSharp.SKBitmap.FromImage(frame))
+                using (var sourceBitmap = SkiaSharp.SKBitmap.FromImage(frame))
                 {
-                    if (bitmap is null)
+                    if (sourceBitmap is null)
                     {
                         throw new InvalidOperationException("フレームをビットマップに変換できませんでした。");
                     }
 
-                    if (bitmap.Width != _projectWidth || bitmap.Height != _projectHeight)
+                    if (sourceBitmap.Width != _projectWidth || sourceBitmap.Height != _projectHeight)
                     {
-                        throw new InvalidOperationException($"フレーム解像度が一致しません。expected={_projectWidth}x{_projectHeight}, actual={bitmap.Width}x{bitmap.Height}");
+                        throw new InvalidOperationException($"フレーム解像度が一致しません。expected={_projectWidth}x{_projectHeight}, actual={sourceBitmap.Width}x{sourceBitmap.Height}");
                     }
 
-                    var pixelBytes = bitmap.GetPixelSpan();
-                    var sourceRowBytes = bitmap.RowBytes;
-                    for (var y = 0; y < _projectHeight; y++)
+                    SKBitmap bitmap;
+                    bool needsConversion = sourceBitmap.ColorType != SKColorType.Bgra8888
+                                        || sourceBitmap.AlphaType != SKAlphaType.Unpremul;
+
+                    if (needsConversion)
                     {
-                        var sourceOffset = y * sourceRowBytes;
-                        var destinationOffset = y * rowByteCount;
-                        pixelBytes.Slice(sourceOffset, rowByteCount).CopyTo(frameBuffer.AsSpan(destinationOffset, rowByteCount));
+                        bitmap = new SKBitmap(sourceBitmap.Width, sourceBitmap.Height, SKColorType.Bgra8888, SKAlphaType.Unpremul);
+                        using (var canvas = new SKCanvas(bitmap))
+                        {
+                            canvas.DrawBitmap(sourceBitmap, 0, 0);
+                        }
                     }
+                    else
+                    {
+                        bitmap = sourceBitmap;
+                    }
+
+                    try
+                    {
+                        var pixelBytes = bitmap.GetPixelSpan();
+                        var sourceRowBytes = bitmap.RowBytes;
+                        for (var y = 0; y < _projectHeight; y++)
+                        {
+                            var sourceOffset = y * sourceRowBytes;
+                            var destinationOffset = y * rowByteCount;
+                            pixelBytes.Slice(sourceOffset, rowByteCount).CopyTo(frameBuffer.AsSpan(destinationOffset, rowByteCount));
+                        }
+                    }
+                    finally
+                    {
+                        if (needsConversion && bitmap != sourceBitmap)
+                        {
+                            bitmap.Dispose();
+                        }
+                    }
+
+                    await outputStream.WriteAsync(frameBuffer.AsMemory(0, frameByteCount), cancellationToken).ConfigureAwait(false);
+
+                    index++;
+                    SetProgressIfGreater(AudioStageWeight + (FrameStageWeight * (index / (double)FrameCount)));
                 }
-
-                await outputStream.WriteAsync(frameBuffer.AsMemory(0, frameByteCount), cancellationToken).ConfigureAwait(false);
-
-                index++;
-                SetProgressIfGreater(AudioStageWeight + (FrameStageWeight * (index / (double)FrameCount)));
             }
         }
         finally
