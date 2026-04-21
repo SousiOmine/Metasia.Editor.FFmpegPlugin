@@ -7,7 +7,7 @@
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <UseLocalMetasiaSource>false</UseLocalMetasiaSource>
-    <MetasiaPackageVersion>0.4.3</MetasiaPackageVersion>
+    <MetasiaPackageVersion>0.4.5</MetasiaPackageVersion>
   </PropertyGroup>
 
   <Import Project="local.props" Condition="Exists('local.props')"/>
@@ -43,7 +43,7 @@
     <PackageReference Include="ReactiveUI" Version="23.2.1">
       <ExcludeAssets>runtime</ExcludeAssets>
     </PackageReference>
-    <PackageReference Include="ReactiveUI.Avalonia" Version="11.4.12">
+    <PackageReference Include="ReactiveUI.Avalonia" Version="12.0.1">
       <ExcludeAssets>runtime</ExcludeAssets>
     </PackageReference>
     <PackageReference Include="FFMpegCore" Version="5.4.0" />
