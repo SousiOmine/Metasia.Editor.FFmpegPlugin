@@ -18,9 +18,9 @@ public sealed class FFmpegOutputEncoder : EncoderBase
     private const int AudioChannelCount = 2;
     private const int AudioBitsPerSample = 16;
     private const long AudioChunkSampleCount = AudioSampleRate * 5L;
-    private const double FrameStageWeight = 0.7;
-    private const double AudioStageWeight = 0.2;
-    private const double MuxStageWeight = 0.1;
+    private const double FrameStageWeight = 0.6;
+    private const double AudioStageWeight = 0.15;
+    private const double MuxStageWeight = 0.25;
 
     private static readonly Regex ProgressTimeRegex = new(
         @"time=(\d{2}:\d{2}:\d{2}(?:\.\d+)?)",
@@ -132,6 +132,7 @@ public sealed class FFmpegOutputEncoder : EncoderBase
     private async Task EncodeAsync(CancellationToken cancellationToken)
     {
         var tempRoot = Path.Combine(Path.GetTempPath(), $"metasia_ffmpeg_{Guid.NewGuid():N}");
+        var tempVideoPath = Path.Combine(tempRoot, "video.mp4");
         var audioWavPath = Path.Combine(tempRoot, "audio.wav");
 
         try
@@ -144,8 +145,9 @@ public sealed class FFmpegOutputEncoder : EncoderBase
                 Directory.CreateDirectory(outputDirectory);
             }
 
+            await EncodeVideoOnlyAsync(tempVideoPath, cancellationToken).ConfigureAwait(false);
             await RenderAudioWavAsync(audioWavPath, cancellationToken).ConfigureAwait(false);
-            await MuxAsync(audioWavPath, OutputPath, cancellationToken).ConfigureAwait(false);
+            await MuxVideoAndAudioAsync(tempVideoPath, audioWavPath, OutputPath, cancellationToken).ConfigureAwait(false);
 
             cancellationToken.ThrowIfCancellationRequested();
             ProgressRate = 1.0;
@@ -246,7 +248,7 @@ public sealed class FFmpegOutputEncoder : EncoderBase
                     await outputStream.WriteAsync(frameBuffer.AsMemory(0, frameByteCount), cancellationToken).ConfigureAwait(false);
 
                     index++;
-                    SetProgressIfGreater(AudioStageWeight + (FrameStageWeight * (index / (double)FrameCount)));
+                    SetProgressIfGreater(FrameStageWeight * (index / (double)FrameCount));
                 }
             }
         }
@@ -299,7 +301,7 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         WriteWavHeader(writer, totalDataBytes);
     }
 
-    private async Task MuxAsync(string audioWavPath, string outputPath, CancellationToken cancellationToken)
+    private async Task EncodeVideoOnlyAsync(string tempVideoPath, CancellationToken cancellationToken)
     {
         var ffmpegPath = ResolveFfmpegExecutablePath(_pluginDirectory);
         if (!File.Exists(ffmpegPath))
@@ -317,9 +319,8 @@ public sealed class FFmpegOutputEncoder : EncoderBase
             throw new InvalidOperationException("出力解像度が不正です。");
         }
 
-        var containerFormat = GetContainerFormatFromPath(outputPath);
+        var containerFormat = GetContainerFormatFromPath(tempVideoPath);
         var effectiveSettings = _settings.ResolveForContainer(containerFormat);
-        LogEffectiveSettingsIfAdjusted(containerFormat, effectiveSettings);
 
         var totalDuration = TimeSpan.FromSeconds(FrameCount / _projectFramerate);
         var framerateArg = _projectFramerate.ToString("0.######", CultureInfo.InvariantCulture);
@@ -335,6 +336,8 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         };
 
         psi.ArgumentList.Add("-y");
+        psi.ArgumentList.Add("-stats_period");
+        psi.ArgumentList.Add("0.05");
         psi.ArgumentList.Add("-f");
         psi.ArgumentList.Add("rawvideo");
         psi.ArgumentList.Add("-pixel_format");
@@ -345,8 +348,6 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         psi.ArgumentList.Add(framerateArg);
         psi.ArgumentList.Add("-i");
         psi.ArgumentList.Add("pipe:0");
-        psi.ArgumentList.Add("-i");
-        psi.ArgumentList.Add(audioWavPath);
 
         psi.ArgumentList.Add("-c:v");
         psi.ArgumentList.Add(effectiveSettings.VideoCodec);
@@ -371,6 +372,85 @@ public sealed class FFmpegOutputEncoder : EncoderBase
 
         psi.ArgumentList.Add("-pix_fmt");
         psi.ArgumentList.Add("yuv420p");
+
+        psi.ArgumentList.Add("-an");
+
+        psi.ArgumentList.Add(tempVideoPath);
+
+        using var process = new Process { StartInfo = psi };
+        lock (_processLock)
+        {
+            _ffmpegProcess = process;
+        }
+
+        var stderr = new StringBuilder();
+        process.Start();
+
+        using var cancelRegistration = cancellationToken.Register(TryTerminateFfmpegProcess);
+        var stderrTask = ConsumeFfmpegStderrAsync(process.StandardError, stderr, totalDuration, cancellationToken, progressBase: 0, progressRange: FrameStageWeight);
+        Task frameWriteTask = WriteFramesToFfmpegAsync(process.StandardInput.BaseStream, cancellationToken);
+
+        try
+        {
+            await frameWriteTask.ConfigureAwait(false);
+            await process.StandardInput.BaseStream.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            try
+            {
+                process.StandardInput.Close();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+            catch (InvalidOperationException)
+            {
+            }
+        }
+
+        await Task.WhenAll(stderrTask, process.WaitForExitAsync(cancellationToken)).ConfigureAwait(false);
+
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"ffmpeg映像エンコード終了コード異常: {process.ExitCode}\n{stderr}");
+        }
+
+        ClearFfmpegProcessReference();
+    }
+
+    private async Task MuxVideoAndAudioAsync(string tempVideoPath, string audioWavPath, string outputPath, CancellationToken cancellationToken)
+    {
+        var ffmpegPath = ResolveFfmpegExecutablePath(_pluginDirectory);
+        if (!File.Exists(ffmpegPath))
+        {
+            throw new FileNotFoundException($"ffmpeg実行ファイルが見つかりません: {ffmpegPath}", ffmpegPath);
+        }
+
+        var containerFormat = GetContainerFormatFromPath(outputPath);
+        var effectiveSettings = _settings.ResolveForContainer(containerFormat);
+        LogEffectiveSettingsIfAdjusted(containerFormat, effectiveSettings);
+
+        var totalDuration = TimeSpan.FromSeconds(FrameCount / _projectFramerate);
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = ffmpegPath,
+            UseShellExecute = false,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+
+        psi.ArgumentList.Add("-y");
+        psi.ArgumentList.Add("-stats_period");
+        psi.ArgumentList.Add("0.05");
+        psi.ArgumentList.Add("-i");
+        psi.ArgumentList.Add(tempVideoPath);
+        psi.ArgumentList.Add("-i");
+        psi.ArgumentList.Add(audioWavPath);
+
+        psi.ArgumentList.Add("-c:v");
+        psi.ArgumentList.Add("copy");
 
         psi.ArgumentList.Add("-c:a");
         psi.ArgumentList.Add(effectiveSettings.AudioCodec);
@@ -399,43 +479,25 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         process.Start();
 
         using var cancelRegistration = cancellationToken.Register(TryTerminateFfmpegProcess);
-        var stderrTask = ConsumeFfmpegStderrAsync(process.StandardError, stderr, totalDuration, cancellationToken);
-        Task frameWriteTask = WriteFramesToFfmpegAsync(process.StandardInput.BaseStream, cancellationToken);
-
-        try
-        {
-            await frameWriteTask.ConfigureAwait(false);
-            await process.StandardInput.BaseStream.FlushAsync(cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            try
-            {
-                process.StandardInput.Close();
-            }
-            catch (ObjectDisposedException)
-            {
-            }
-            catch (InvalidOperationException)
-            {
-            }
-        }
-
-        await Task.WhenAll(stderrTask, process.WaitForExitAsync(cancellationToken)).ConfigureAwait(false);
+        var progressBase = FrameStageWeight + AudioStageWeight;
+        var progressRange = MuxStageWeight;
+        await Task.WhenAll(
+            ConsumeFfmpegStderrAsync(process.StandardError, stderr, totalDuration, cancellationToken, progressBase, progressRange),
+            process.WaitForExitAsync(cancellationToken)).ConfigureAwait(false);
 
         if (process.ExitCode != 0)
         {
-            throw new InvalidOperationException($"ffmpegの終了コードが異常です: {process.ExitCode}\n{stderr}");
+            throw new InvalidOperationException($"ffmpeg多重化終了コード異常: {process.ExitCode}\n{stderr}");
         }
-
-        SetProgress(FrameStageWeight + AudioStageWeight + MuxStageWeight);
     }
 
     private async Task ConsumeFfmpegStderrAsync(
         StreamReader stderrReader,
         StringBuilder stderrBuffer,
         TimeSpan totalDuration,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        double progressBase = 0,
+        double progressRange = 1)
     {
         while (true)
         {
@@ -451,7 +513,7 @@ public sealed class FFmpegOutputEncoder : EncoderBase
             if (TryParseFfmpegProgress(line, out var processed) && totalDuration > TimeSpan.Zero)
             {
                 var ratio = Math.Clamp(processed.TotalSeconds / totalDuration.TotalSeconds, 0, 1);
-                SetProgressIfGreater(AudioStageWeight + FrameStageWeight + (MuxStageWeight * ratio));
+                SetProgressIfGreater(progressBase + (progressRange * ratio));
             }
         }
     }
@@ -538,6 +600,14 @@ public sealed class FFmpegOutputEncoder : EncoderBase
                     _ffmpegProcess = null;
                 }
             }
+        }
+    }
+
+    private void ClearFfmpegProcessReference()
+    {
+        lock (_processLock)
+        {
+            _ffmpegProcess = null;
         }
     }
 
