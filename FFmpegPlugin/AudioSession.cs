@@ -7,7 +7,7 @@ namespace FFmpegPlugin;
 internal sealed class AudioSession : IDisposable
 {
     private const int TargetChannelCount = 2;
-    private const long CacheWindowSamples = 176400;
+    private const long CacheWindowSamples = 441000;
     private const long CachePrerollSamples = 6615;
 
     private readonly object _sync = new();

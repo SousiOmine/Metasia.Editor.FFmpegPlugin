@@ -7,7 +7,7 @@
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <UseLocalMetasiaSource>false</UseLocalMetasiaSource>
-    <MetasiaPackageVersion>0.4.5</MetasiaPackageVersion>
+    <MetasiaPackageVersion>0.4.8</MetasiaPackageVersion>
   </PropertyGroup>
 
   <Import Project="local.props" Condition="Exists('local.props')"/>
@@ -37,10 +37,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Avalonia" Version="12.0.1">
+    <PackageReference Include="Avalonia" Version="12.0.2">
       <ExcludeAssets>runtime</ExcludeAssets>
     </PackageReference>
-    <PackageReference Include="ReactiveUI" Version="23.2.1">
+    <PackageReference Include="ReactiveUI" Version="23.2.19">
       <ExcludeAssets>runtime</ExcludeAssets>
     </PackageReference>
     <PackageReference Include="ReactiveUI.Avalonia" Version="12.0.1">

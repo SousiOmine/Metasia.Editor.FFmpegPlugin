@@ -181,7 +181,70 @@ public class FFmpegPlugin : IMediaInputPlugin, IMediaOutputPlugin, IPluginSettin
             return new AudioSampleResult { IsSuccessful = false, Chunk = null };
         }
     }
-    
+
+    public Task<VideoMediaInfoResult?> GetVideoMediaInfoAsync(string path)
+    {
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return Task.FromResult<VideoMediaInfoResult?>(null);
+            }
+
+            var mediaInfo = FFProbe.Analyse(path);
+            if (mediaInfo.VideoStreams.Count == 0)
+            {
+                return Task.FromResult<VideoMediaInfoResult?>(null);
+            }
+
+            var videoStream = mediaInfo.VideoStreams[0];
+            return Task.FromResult<VideoMediaInfoResult?>(new VideoMediaInfoResult
+            {
+                IsSuccessful = true,
+                Duration = mediaInfo.Duration,
+                Width = videoStream.Width,
+                Height = videoStream.Height,
+                FrameRate = videoStream.FrameRate,
+            });
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"GetVideoMediaInfoAsyncエラー: {ex.Message}");
+            return Task.FromResult<VideoMediaInfoResult?>(null);
+        }
+    }
+
+    public Task<AudioMediaInfoResult?> GetAudioMediaInfoAsync(string path)
+    {
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return Task.FromResult<AudioMediaInfoResult?>(null);
+            }
+
+            var mediaInfo = FFProbe.Analyse(path);
+            if (mediaInfo.AudioStreams.Count == 0)
+            {
+                return Task.FromResult<AudioMediaInfoResult?>(null);
+            }
+
+            var audioStream = mediaInfo.AudioStreams[0];
+            return Task.FromResult<AudioMediaInfoResult?>(new AudioMediaInfoResult
+            {
+                IsSuccessful = true,
+                Duration = mediaInfo.Duration,
+                SampleRate = audioStream.SampleRateHz,
+                Channels = audioStream.Channels,
+            });
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"GetAudioMediaInfoAsyncエラー: {ex.Message}");
+            return Task.FromResult<AudioMediaInfoResult?>(null);
+        }
+    }
+
     public void Dispose()
     {
         _frameProvider.Dispose();
