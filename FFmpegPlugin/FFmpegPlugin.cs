@@ -43,7 +43,11 @@ public class FFmpegPlugin : IMediaInputPlugin, IMediaOutputPlugin, IPluginSettin
         _pluginDirectory = pluginDirectory;
         _settings = PluginSettings.Load(pluginDirectory);
 
-        GlobalFFOptions.Configure(new FFOptions { BinaryFolder = pluginDirectory });
+        string ffmpegPath = FfmpegPathResolver.Resolve(pluginDirectory);
+        if (File.Exists(ffmpegPath) && Path.GetDirectoryName(ffmpegPath) is { } binaryFolder)
+        {
+            GlobalFFOptions.Configure(new FFOptions { BinaryFolder = binaryFolder });
+        }
         Environment.SetEnvironmentVariable(
             FFmpegPluginEnvironmentVariables.HardwareDecode,
             _settings.HardwareDecodeEnabled ? "1" : "0");
@@ -127,13 +131,7 @@ public class FFmpegPlugin : IMediaInputPlugin, IMediaOutputPlugin, IPluginSettin
                 return new AudioFileAccessorResult { IsSuccessful = false, Chunk = null };
             }
 
-            string ffmpegPath = ResolveFfmpegExecutablePath(_pluginDirectory);
-            if (!File.Exists(ffmpegPath))
-            {
-                return new AudioFileAccessorResult { IsSuccessful = false, Chunk = null };
-            }
-
-            AudioSession session = GetOrCreateAudioSession(path, ffmpegPath);
+            AudioSession session = GetOrCreateAudioSession(path, FfmpegPathResolver.Resolve(_pluginDirectory));
             AudioChunk? chunk = await session.GetAudioAsync(startTime, duration).ConfigureAwait(false);
 
             return new AudioFileAccessorResult
@@ -158,13 +156,7 @@ public class FFmpegPlugin : IMediaInputPlugin, IMediaOutputPlugin, IPluginSettin
                 return new AudioSampleResult { IsSuccessful = false, Chunk = null };
             }
 
-            string ffmpegPath = ResolveFfmpegExecutablePath(_pluginDirectory);
-            if (!File.Exists(ffmpegPath))
-            {
-                return new AudioSampleResult { IsSuccessful = false, Chunk = null };
-            }
-
-            AudioSession session = GetOrCreateAudioSession(path, ffmpegPath);
+            AudioSession session = GetOrCreateAudioSession(path, FfmpegPathResolver.Resolve(_pluginDirectory));
             AudioChunk? chunk = await session.GetAudioBySampleAsync(startSample, sampleCount, sampleRate).ConfigureAwait(false);
 
             return new AudioSampleResult
@@ -282,12 +274,6 @@ public class FFmpegPlugin : IMediaInputPlugin, IMediaOutputPlugin, IPluginSettin
         }
 
         return AppContext.BaseDirectory;
-    }
-
-    private static string ResolveFfmpegExecutablePath(string pluginDirectory)
-    {
-        string executableName = OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg";
-        return Path.Combine(pluginDirectory, executableName);
     }
 
     private AudioSession GetOrCreateAudioSession(string mediaPath, string ffmpegPath)

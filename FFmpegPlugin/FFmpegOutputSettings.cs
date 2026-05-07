@@ -14,10 +14,11 @@ public sealed record FFmpegOutputSettings(
     string VideoPreset,
     string AudioBitrate,
     bool EnableFastStart,
+    bool UseHardwareEncoder,
     int? OutputWidth,
     int? OutputHeight)
 {
-    public static FFmpegOutputSettings Default { get; } = new("libx264", "aac", "veryfast", "192k", true, null, null);
+    public static FFmpegOutputSettings Default { get; } = new("libx264", "aac", "veryfast", "192k", true, true, null, null);
 
     internal FFmpegOutputSettings ResolveForContainer(FFmpegOutputContainer container)
     {

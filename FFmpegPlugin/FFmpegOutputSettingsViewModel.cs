@@ -72,6 +72,12 @@ public sealed class FFmpegOutputSettingsViewModel : ReactiveObject
         set => this.RaiseAndSetIfChanged(ref _enableFastStart, value);
     }
 
+    public bool UseHardwareEncoder
+    {
+        get => _useHardwareEncoder;
+        set => this.RaiseAndSetIfChanged(ref _useHardwareEncoder, value);
+    }
+
     public bool UseCustomResolution
     {
         get => _useCustomResolution;
@@ -95,6 +101,7 @@ public sealed class FFmpegOutputSettingsViewModel : ReactiveObject
     private string _videoPreset = FFmpegOutputSettings.Default.VideoPreset;
     private string _audioBitrate = FFmpegOutputSettings.Default.AudioBitrate;
     private bool _enableFastStart = FFmpegOutputSettings.Default.EnableFastStart;
+    private bool _useHardwareEncoder = FFmpegOutputSettings.Default.UseHardwareEncoder;
     private bool _useCustomResolution = false;
     private int _customWidth = 1920;
     private int _customHeight = 1080;
@@ -110,7 +117,7 @@ public sealed class FFmpegOutputSettingsViewModel : ReactiveObject
         int? width = UseCustomResolution ? NormalizeResolutionDimension(CustomWidth) : null;
         int? height = UseCustomResolution ? NormalizeResolutionDimension(CustomHeight) : null;
 
-        return new FFmpegOutputSettings(vCodec, aCodec, preset, NormalizeAudioBitrate(AudioBitrate), EnableFastStart, width, height);
+        return new FFmpegOutputSettings(vCodec, aCodec, preset, NormalizeAudioBitrate(AudioBitrate), EnableFastStart, UseHardwareEncoder, width, height);
     }
 
     private bool IsValidVideoCodec(string value)

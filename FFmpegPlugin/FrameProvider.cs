@@ -5,7 +5,7 @@ namespace FFmpegPlugin;
 
 public class FrameProvider : IDisposable
 {
-    private readonly ConcurrentDictionary<string, VideoSession> _sessions = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, VideoSession> _sessions = new(StringComparer.OrdinalIgnoreCase);
     private bool _disposed = false;
 
     /// <summary>

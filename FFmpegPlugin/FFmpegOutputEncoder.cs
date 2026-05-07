@@ -26,6 +26,9 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         @"time=(\d{2}:\d{2}:\d{2}(?:\.\d+)?)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    private string? _cachedHardwareEncoder;
+    private bool _hardwareEncoderChecked;
+
     public string Name { get; } = "FFmpeg Video";
     public string[] SupportedExtensions { get; } = ["*.mp4", "*.mkv", "*.mov", "*.avi"];
     public override double ProgressRate { get; protected set; }
@@ -131,6 +134,7 @@ public sealed class FFmpegOutputEncoder : EncoderBase
 
     private async Task EncodeAsync(CancellationToken cancellationToken)
     {
+        var encodeSw = Stopwatch.StartNew();
         var tempRoot = Path.Combine(Path.GetTempPath(), $"metasia_ffmpeg_{Guid.NewGuid():N}");
         var tempVideoPath = Path.Combine(tempRoot, "video.mp4");
         var audioWavPath = Path.Combine(tempRoot, "audio.wav");
@@ -145,11 +149,26 @@ public sealed class FFmpegOutputEncoder : EncoderBase
                 Directory.CreateDirectory(outputDirectory);
             }
 
+            Debug.WriteLine($"[FFmpeg] [Perf] [Encode-Start] frames={FrameCount} input={_projectWidth}x{_projectHeight} output={_outputWidth}x{_outputHeight} codec={_settings.VideoCodec} preset={_settings.VideoPreset} framerate={_projectFramerate}");
+
+            var videoSw = Stopwatch.StartNew();
             await EncodeVideoOnlyAsync(tempVideoPath, cancellationToken).ConfigureAwait(false);
+            videoSw.Stop();
+            Debug.WriteLine($"[FFmpeg] [Perf] [Video-Only] time={videoSw.ElapsedMilliseconds}ms");
+
+            var audioSw = Stopwatch.StartNew();
             await RenderAudioWavAsync(audioWavPath, cancellationToken).ConfigureAwait(false);
+            audioSw.Stop();
+            Debug.WriteLine($"[FFmpeg] [Perf] [Audio-Wav] time={audioSw.ElapsedMilliseconds}ms");
+
+            var muxSw = Stopwatch.StartNew();
             await MuxVideoAndAudioAsync(tempVideoPath, audioWavPath, OutputPath, cancellationToken).ConfigureAwait(false);
+            muxSw.Stop();
+            Debug.WriteLine($"[FFmpeg] [Perf] [Mux] time={muxSw.ElapsedMilliseconds}ms");
 
             cancellationToken.ThrowIfCancellationRequested();
+            var totalMs = encodeSw.ElapsedMilliseconds;
+            Debug.WriteLine($"[FFmpeg] [Perf] [Encode-Completed] totalTime={totalMs}ms videoTime={videoSw.ElapsedMilliseconds}ms audioTime={audioSw.ElapsedMilliseconds}ms muxTime={muxSw.ElapsedMilliseconds}ms");
             ProgressRate = 1.0;
             Status = IEncoder.EncoderState.Completed;
             StatusChanged.Invoke(this, EventArgs.Empty);
@@ -157,11 +176,13 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         }
         catch (OperationCanceledException)
         {
+            Debug.WriteLine($"[FFmpeg] [Perf] [Encode-Canceled] elapsedTime={encodeSw.ElapsedMilliseconds}ms");
             Status = IEncoder.EncoderState.Canceled;
             StatusChanged.Invoke(this, EventArgs.Empty);
         }
         catch (Exception ex)
         {
+            Debug.WriteLine($"[FFmpeg] [Perf] [Encode-Failed] elapsedTime={encodeSw.ElapsedMilliseconds}ms error={ex.Message}");
             Debug.WriteLine($"FFmpeg出力失敗: {ex}");
             Status = IEncoder.EncoderState.Failed;
             StatusChanged.Invoke(this, EventArgs.Empty);
@@ -186,68 +207,38 @@ public sealed class FFmpegOutputEncoder : EncoderBase
             throw new InvalidOperationException("プロジェクト解像度が不正です。");
         }
 
-        int bytesPerPixel = 4;
-        int rowByteCount = checked(_projectWidth * bytesPerPixel);
-        int frameByteCount = checked(rowByteCount * _projectHeight);
+        int frameByteCount = checked(_projectWidth * _projectHeight * 3 / 2);
         byte[] frameBuffer = ArrayPool<byte>.Shared.Rent(frameByteCount);
 
         var index = 0;
+        var frameSw = Stopwatch.StartNew();
         try
         {
             await foreach (var frame in GetFramesAsync(0, FrameCount - 1, cancellationToken).ConfigureAwait(false))
             {
                 using (frame)
-                using (var sourceBitmap = SkiaSharp.SKBitmap.FromImage(frame))
                 {
-                    if (sourceBitmap is null)
+                    if (frame.PeekPixels() is { } pixmap)
                     {
-                        throw new InvalidOperationException("フレームをビットマップに変換できませんでした。");
-                    }
-
-                    if (sourceBitmap.Width != _projectWidth || sourceBitmap.Height != _projectHeight)
-                    {
-                        throw new InvalidOperationException($"フレーム解像度が一致しません。expected={_projectWidth}x{_projectHeight}, actual={sourceBitmap.Width}x{sourceBitmap.Height}");
-                    }
-
-                    SKBitmap bitmap;
-                    bool needsConversion = sourceBitmap.ColorType != SKColorType.Bgra8888
-                                        || sourceBitmap.AlphaType != SKAlphaType.Unpremul;
-
-                    if (needsConversion)
-                    {
-                        bitmap = new SKBitmap(sourceBitmap.Width, sourceBitmap.Height, SKColorType.Bgra8888, SKAlphaType.Unpremul);
-                        using (var canvas = new SKCanvas(bitmap))
+                        using (pixmap)
                         {
-                            canvas.DrawBitmap(sourceBitmap, 0, 0);
+                            RgbaPremulToYuv420p(pixmap.GetPixelSpan(), _projectWidth, _projectHeight, pixmap.RowBytes, frameBuffer);
                         }
                     }
                     else
                     {
-                        bitmap = sourceBitmap;
-                    }
-
-                    try
-                    {
-                        var pixelBytes = bitmap.GetPixelSpan();
-                        var sourceRowBytes = bitmap.RowBytes;
-                        for (var y = 0; y < _projectHeight; y++)
-                        {
-                            var sourceOffset = y * sourceRowBytes;
-                            var destinationOffset = y * rowByteCount;
-                            pixelBytes.Slice(sourceOffset, rowByteCount).CopyTo(frameBuffer.AsSpan(destinationOffset, rowByteCount));
-                        }
-                    }
-                    finally
-                    {
-                        if (needsConversion && bitmap != sourceBitmap)
-                        {
-                            bitmap.Dispose();
-                        }
+                        using var fallback = SKBitmap.FromImage(frame);
+                        RgbaPremulToYuv420p(fallback.GetPixelSpan(), _projectWidth, _projectHeight, fallback.RowBytes, frameBuffer);
                     }
 
                     await outputStream.WriteAsync(frameBuffer.AsMemory(0, frameByteCount), cancellationToken).ConfigureAwait(false);
 
                     index++;
+                    var elapsedMs = frameSw.ElapsedMilliseconds;
+                    if (index % 30 == 0 || index == FrameCount)
+                    {
+                        Debug.WriteLine($"[FFmpeg] [Perf] [Frame-Render] frame={index}/{FrameCount} elapsedMs={elapsedMs}ms avgMs={elapsedMs / (double)index:F2}ms fps={index / (elapsedMs / 1000.0):F1}");
+                    }
                     SetProgressIfGreater(FrameStageWeight * (index / (double)FrameCount));
                 }
             }
@@ -255,6 +246,62 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         finally
         {
             ArrayPool<byte>.Shared.Return(frameBuffer);
+        }
+    }
+
+    private static void RgbaPremulToYuv420p(ReadOnlySpan<byte> rgba, int width, int height, int rowBytes, Span<byte> yuv)
+    {
+        int frameSize = width * height;
+        int chromaWidth = width >> 1;
+        int chromaHeight = height >> 1;
+        int chromaSize = chromaWidth * chromaHeight;
+
+        var yPlane = yuv[..frameSize];
+        var uPlane = yuv.Slice(frameSize, chromaSize);
+        var vPlane = yuv.Slice(frameSize + chromaSize, chromaSize);
+
+        for (int y = 0; y < height; y += 2)
+        {
+            for (int x = 0; x < width; x += 2)
+            {
+                int rSum = 0, gSum = 0, bSum = 0;
+
+                for (int dy = 0; dy < 2; dy++)
+                {
+                    int py = y + dy;
+                    int rowOffset = py * rowBytes;
+                    for (int dx = 0; dx < 2; dx++)
+                    {
+                        int px = x + dx;
+                        if (px >= width) continue;
+
+                        int offset = rowOffset + (px << 2);
+                        byte r = rgba[offset];
+                        byte g = rgba[offset + 1];
+                        byte b = rgba[offset + 2];
+
+                        int yVal = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+                        yPlane[py * width + px] = (byte)((uint)yVal > 255 ? (yVal < 0 ? 0 : 255) : yVal);
+
+                        rSum += r;
+                        gSum += g;
+                        bSum += b;
+                    }
+                }
+
+                if (y + 1 >= height) continue;
+
+                int avgR = rSum >> 2;
+                int avgG = gSum >> 2;
+                int avgB = bSum >> 2;
+
+                int uVal = ((-38 * avgR - 74 * avgG + 112 * avgB + 128) >> 8) + 128;
+                int vVal = ((112 * avgR - 94 * avgG - 18 * avgB + 128) >> 8) + 128;
+
+                int chromaOffset = (y >> 1) * chromaWidth + (x >> 1);
+                uPlane[chromaOffset] = (byte)((uint)uVal > 255 ? (uVal < 0 ? 0 : 255) : uVal);
+                vPlane[chromaOffset] = (byte)((uint)vVal > 255 ? (vVal < 0 ? 0 : 255) : vVal);
+            }
         }
     }
 
@@ -268,10 +315,13 @@ public sealed class FFmpegOutputEncoder : EncoderBase
 
         long writtenSamples = 0;
         long totalDataBytes = 0;
+        var audioSw = Stopwatch.StartNew();
+        var chunkIndex = 0;
 
         while (writtenSamples < totalSamples)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var chunkSw = Stopwatch.StartNew();
 
             var chunkSampleCount = Math.Min(AudioChunkSampleCount, totalSamples - writtenSamples);
             var chunk = await GetAudioChunkAsync(
@@ -280,6 +330,8 @@ public sealed class FFmpegOutputEncoder : EncoderBase
                 AudioSampleRate,
                 AudioChannelCount,
                 cancellationToken).ConfigureAwait(false);
+
+            var getAudioMs = chunkSw.ElapsedMilliseconds;
 
             var actualSampleCount = Math.Min(chunk.Length, chunkSampleCount);
             if (actualSampleCount <= 0)
@@ -292,6 +344,12 @@ public sealed class FFmpegOutputEncoder : EncoderBase
 
             writtenSamples += actualSampleCount;
             totalDataBytes += bytes.Length;
+            chunkIndex++;
+
+            if (chunkIndex % 5 == 0 || writtenSamples >= totalSamples)
+            {
+                Debug.WriteLine($"[FFmpeg] [Perf] [Audio-Chunk] chunk={chunkIndex} samples={writtenSamples}/{totalSamples} getAudioMs={getAudioMs}ms chunkTotalMs={chunkSw.ElapsedMilliseconds}ms");
+            }
 
             var ratio = totalSamples <= 0 ? 1.0 : writtenSamples / (double)totalSamples;
             SetProgress(FrameStageWeight + (AudioStageWeight * ratio));
@@ -303,7 +361,7 @@ public sealed class FFmpegOutputEncoder : EncoderBase
 
     private async Task EncodeVideoOnlyAsync(string tempVideoPath, CancellationToken cancellationToken)
     {
-        var ffmpegPath = ResolveFfmpegExecutablePath(_pluginDirectory);
+        var ffmpegPath = FfmpegPathResolver.Resolve(_pluginDirectory);
         if (!File.Exists(ffmpegPath))
         {
             throw new FileNotFoundException($"ffmpeg実行ファイルが見つかりません: {ffmpegPath}", ffmpegPath);
@@ -326,6 +384,23 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         var framerateArg = _projectFramerate.ToString("0.######", CultureInfo.InvariantCulture);
         var needScale = _projectWidth != _outputWidth || _projectHeight != _outputHeight;
 
+        var videoCodec = effectiveSettings.VideoCodec;
+        var videoPreset = effectiveSettings.VideoPreset;
+        bool useHardware = effectiveSettings.UseHardwareEncoder
+                        && videoCodec != "libaom-av1"
+                        && containerFormat != FFmpegOutputContainer.Avi;
+
+        if (useHardware)
+        {
+            var hwEncoder = await DetectHardwareEncoderAsync(ffmpegPath, cancellationToken).ConfigureAwait(false);
+            if (hwEncoder is not null)
+            {
+                videoCodec = hwEncoder;
+                videoPreset = MapPresetToHardware(videoPreset, hwEncoder);
+                Debug.WriteLine($"[FFmpeg] [Perf] [HW-Encoder] detected={hwEncoder} preset={videoPreset}");
+            }
+        }
+
         var psi = new ProcessStartInfo
         {
             FileName = ffmpegPath,
@@ -341,7 +416,7 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         psi.ArgumentList.Add("-f");
         psi.ArgumentList.Add("rawvideo");
         psi.ArgumentList.Add("-pixel_format");
-        psi.ArgumentList.Add("bgra");
+        psi.ArgumentList.Add("yuv420p");
         psi.ArgumentList.Add("-video_size");
         psi.ArgumentList.Add($"{_projectWidth}x{_projectHeight}");
         psi.ArgumentList.Add("-framerate");
@@ -350,18 +425,21 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         psi.ArgumentList.Add("pipe:0");
 
         psi.ArgumentList.Add("-c:v");
-        psi.ArgumentList.Add(effectiveSettings.VideoCodec);
+        psi.ArgumentList.Add(videoCodec);
 
-        if (effectiveSettings.VideoCodec == "libx264" || effectiveSettings.VideoCodec == "libx265")
+        if (videoCodec is "libx264" or "libx265")
         {
             psi.ArgumentList.Add("-preset");
-            psi.ArgumentList.Add(effectiveSettings.VideoPreset);
+            psi.ArgumentList.Add(videoPreset);
         }
-
-        if (effectiveSettings.VideoCodec == "libaom-av1")
+        else if (videoCodec is "libaom-av1")
         {
             psi.ArgumentList.Add("-cpu-used");
             psi.ArgumentList.Add("4");
+        }
+        else if (IsHardwareEncoder(videoCodec))
+        {
+            AddHardwareEncoderOptions(psi.ArgumentList, videoCodec, videoPreset);
         }
 
         if (needScale)
@@ -384,7 +462,10 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         }
 
         var stderr = new StringBuilder();
+        var processStartSw = Stopwatch.StartNew();
         process.Start();
+        processStartSw.Stop();
+        Debug.WriteLine($"[FFmpeg] [Perf] [Video-ProcessStart] time={processStartSw.ElapsedMilliseconds}ms args=-f rawvideo -pixel_format yuv420p -video_size {_projectWidth}x{_projectHeight} -framerate {framerateArg} -c:v {videoCodec}");
 
         using var cancelRegistration = cancellationToken.Register(TryTerminateFfmpegProcess);
         var stderrTask = ConsumeFfmpegStderrAsync(process.StandardError, stderr, totalDuration, cancellationToken, progressBase: 0, progressRange: FrameStageWeight);
@@ -419,9 +500,186 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         ClearFfmpegProcessReference();
     }
 
+    private static string MapPresetToHardware(string preset, string hwEncoder)
+    {
+        if (hwEncoder == "h264_nvenc")
+        {
+            return preset switch
+            {
+                "ultrafast" or "superfast" => "p1",
+                "veryfast" or "faster" => "p2",
+                "fast" or "medium" => "p3",
+                "slow" => "p5",
+                "slower" or "veryslow" => "p7",
+                _ => "p2"
+            };
+        }
+
+        if (hwEncoder == "h264_amf")
+        {
+            return preset switch
+            {
+                "ultrafast" or "superfast" or "veryfast" or "faster" => "speed",
+                "slow" or "slower" or "veryslow" => "quality",
+                _ => "balanced"
+            };
+        }
+
+        if (hwEncoder == "h264_qsv")
+        {
+            return preset switch
+            {
+                "ultrafast" or "superfast" => "veryfast",
+                "veryfast" => "veryfast",
+                "faster" => "faster",
+                "fast" => "fast",
+                "slow" => "slow",
+                "slower" => "slower",
+                "veryslow" => "veryslow",
+                _ => "medium"
+            };
+        }
+
+        return preset;
+    }
+
+    private static bool IsHardwareEncoder(string videoCodec)
+    {
+        return videoCodec is "h264_nvenc" or "h264_amf" or "h264_qsv";
+    }
+
+    private static void AddHardwareEncoderOptions(System.Collections.ObjectModel.Collection<string> arguments, string videoCodec, string videoPreset)
+    {
+        arguments.Add("-preset");
+        arguments.Add(videoPreset);
+
+        if (videoCodec == "h264_nvenc")
+        {
+            arguments.Add("-rc");
+            arguments.Add("vbr_hq");
+        }
+        else if (videoCodec == "h264_amf")
+        {
+            arguments.Add("-rc");
+            arguments.Add("hqvbr");
+        }
+
+        arguments.Add("-b:v");
+        arguments.Add("10M");
+        arguments.Add("-maxrate");
+        arguments.Add("20M");
+    }
+
+    private async Task<string?> DetectHardwareEncoderAsync(string ffmpegPath, CancellationToken cancellationToken)
+    {
+        if (_hardwareEncoderChecked)
+        {
+            return _cachedHardwareEncoder;
+        }
+
+        _hardwareEncoderChecked = true;
+
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = ffmpegPath,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+            psi.ArgumentList.Add("-encoders");
+
+            using var process = new Process { StartInfo = psi };
+            process.Start();
+
+            var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+            var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+
+            var output = await outputTask.ConfigureAwait(false);
+            await stderrTask.ConfigureAwait(false);
+
+            foreach (var encoder in new[] { "h264_nvenc", "h264_amf", "h264_qsv" })
+            {
+                if (!output.Contains(encoder, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (await CanUseHardwareEncoderAsync(ffmpegPath, encoder, cancellationToken).ConfigureAwait(false))
+                {
+                    _cachedHardwareEncoder = encoder;
+                    break;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[FFmpeg] [Perf] [HW-Detect-Failed] {ex.Message}");
+        }
+
+        return _cachedHardwareEncoder;
+    }
+
+    private static async Task<bool> CanUseHardwareEncoderAsync(string ffmpegPath, string encoder, CancellationToken cancellationToken)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = ffmpegPath,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+
+        psi.ArgumentList.Add("-hide_banner");
+        psi.ArgumentList.Add("-loglevel");
+        psi.ArgumentList.Add("error");
+        psi.ArgumentList.Add("-f");
+        psi.ArgumentList.Add("lavfi");
+        psi.ArgumentList.Add("-i");
+        psi.ArgumentList.Add("color=c=black:s=32x32:r=1");
+        psi.ArgumentList.Add("-frames:v");
+        psi.ArgumentList.Add("1");
+        psi.ArgumentList.Add("-an");
+        psi.ArgumentList.Add("-c:v");
+        psi.ArgumentList.Add(encoder);
+        AddHardwareEncoderOptions(psi.ArgumentList, encoder, MapPresetToHardware("veryfast", encoder));
+        psi.ArgumentList.Add("-f");
+        psi.ArgumentList.Add("null");
+        psi.ArgumentList.Add("-");
+
+        try
+        {
+            using var process = new Process { StartInfo = psi };
+            process.Start();
+
+            var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+            var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            await outputTask.ConfigureAwait(false);
+            var stderr = await stderrTask.ConfigureAwait(false);
+
+            if (process.ExitCode == 0)
+            {
+                return true;
+            }
+
+            Debug.WriteLine($"[FFmpeg] [Perf] [HW-Probe-Failed] encoder={encoder} exit={process.ExitCode} {stderr}");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Debug.WriteLine($"[FFmpeg] [Perf] [HW-Probe-Failed] encoder={encoder} {ex.Message}");
+        }
+
+        return false;
+    }
+
     private async Task MuxVideoAndAudioAsync(string tempVideoPath, string audioWavPath, string outputPath, CancellationToken cancellationToken)
     {
-        var ffmpegPath = ResolveFfmpegExecutablePath(_pluginDirectory);
+        var ffmpegPath = FfmpegPathResolver.Resolve(_pluginDirectory);
         if (!File.Exists(ffmpegPath))
         {
             throw new FileNotFoundException($"ffmpeg実行ファイルが見つかりません: {ffmpegPath}", ffmpegPath);
@@ -477,6 +735,7 @@ public sealed class FFmpegOutputEncoder : EncoderBase
 
         var stderr = new StringBuilder();
         process.Start();
+        Debug.WriteLine($"[FFmpeg] [Perf] [Mux-Start] container={containerFormat} videoCodec=copy audioCodec={effectiveSettings.AudioCodec} audioBitrate={effectiveSettings.AudioBitrate} faststart={effectiveSettings.EnableFastStart}");
 
         using var cancelRegistration = cancellationToken.Register(TryTerminateFfmpegProcess);
         var progressBase = FrameStageWeight + AudioStageWeight;
@@ -658,12 +917,6 @@ public sealed class FFmpegOutputEncoder : EncoderBase
         {
             Debug.WriteLine($"一時フォルダ削除失敗(権限): {path}, {ex.Message}");
         }
-    }
-
-    private static string ResolveFfmpegExecutablePath(string pluginDirectory)
-    {
-        var executableName = OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg";
-        return Path.Combine(pluginDirectory, executableName);
     }
 
     private void LogEffectiveSettingsIfAdjusted(FFmpegOutputContainer container, FFmpegOutputSettings effectiveSettings)
