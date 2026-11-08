@@ -194,9 +194,9 @@ public class FFmpegPlugin : IMediaInputPlugin, IMediaOutputPlugin, IPluginSettin
             {
                 IsSuccessful = true,
                 Duration = mediaInfo.Duration,
-                Width = videoStream.Width,
-                Height = videoStream.Height,
-                FrameRate = videoStream.FrameRate,
+                Width = videoStream.Width ?? throw new InvalidOperationException($"動画の幅を取得できません: {path}"),
+                Height = videoStream.Height ?? throw new InvalidOperationException($"動画の高さを取得できません: {path}"),
+                FrameRate = videoStream.AverageFrameRate,
             });
         }
         catch (Exception ex)
@@ -226,8 +226,8 @@ public class FFmpegPlugin : IMediaInputPlugin, IMediaOutputPlugin, IPluginSettin
             {
                 IsSuccessful = true,
                 Duration = mediaInfo.Duration,
-                SampleRate = audioStream.SampleRateHz,
-                Channels = audioStream.Channels,
+                SampleRate = audioStream.SampleRateHz ?? throw new InvalidOperationException($"音声のサンプリングレートを取得できません: {path}"),
+                Channels = audioStream.Channels ?? throw new InvalidOperationException($"音声のチャンネル数を取得できません: {path}"),
             });
         }
         catch (Exception ex)

@@ -51,10 +51,11 @@ public class FFmpegDecodeSession : IDisposable
         if (_mediaInfo.VideoStreams.Count == 0)
             throw new InvalidOperationException($"動画ストリームが見つかりません: {_videoPath}");
 
-        _width = _mediaInfo.VideoStreams[0].Width;
-        _height = _mediaInfo.VideoStreams[0].Height;
+        var videoStream = _mediaInfo.VideoStreams[0];
+        _width = videoStream.Width ?? throw new InvalidOperationException($"動画の幅を取得できません: {_videoPath}");
+        _height = videoStream.Height ?? throw new InvalidOperationException($"動画の高さを取得できません: {_videoPath}");
         _pipeBlockSize = ResolvePipeBlockSize(RawFrameBuffer.ResolveFrameSizeOrThrow(_width, _height));
-        _framerate = _mediaInfo.VideoStreams[0].FrameRate;
+        _framerate = videoStream.AverageFrameRate;
         _bitmapPool = new BitmapPool(_width, _height, 64);
     }
 
@@ -332,12 +333,12 @@ public class FFmpegDecodeSession : IDisposable
             .ProcessAsynchronously().ConfigureAwait(false);
     }
 
-    private static FFMpegArgumentOptions ConfigureInputOptions(
-        FFMpegArgumentOptions options,
+    private static FFMpegInputOptions ConfigureInputOptions(
+        FFMpegInputOptions options,
         TimeSpan startTime,
         bool useHardwareDecode)
     {
-        options.Seek(startTime);
+        options.WithStartTime(startTime);
         if (useHardwareDecode)
         {
             options.WithCustomArgument($"-hwaccel {ResolveHardwareDecodeApi()}");
@@ -346,8 +347,8 @@ public class FFmpegDecodeSession : IDisposable
         return options;
     }
 
-    private FFMpegArgumentOptions ConfigureDecodeOutputOptions(
-        FFMpegArgumentOptions options,
+    private FFMpegOutputOptions ConfigureDecodeOutputOptions(
+        FFMpegOutputOptions options,
         string? maxLengthStr,
         bool singleFrame)
     {
@@ -365,11 +366,11 @@ public class FFmpegDecodeSession : IDisposable
         return configured;
     }
 
-    private FFMpegArgumentOptions ConfigureOutputOptions(FFMpegArgumentOptions options)
+    private FFMpegOutputOptions ConfigureOutputOptions(FFMpegOutputOptions options)
     {
         return options
             .ForceFormat("rawvideo")
-            .WithSpeedPreset(Speed.UltraFast)
+            .WithSpeedPreset(EncoderPreset.UltraFast)
             .WithCustomArgument("-pix_fmt bgra")
             .WithCustomArgument("-an -sn -dn");
     }

@@ -1,7 +1,7 @@
 using System.Collections.ObjectModel;
-using System.Reactive;
 using Metasia.Editor.Plugin;
 using ReactiveUI;
+using RxVoid = ReactiveUI.Primitives.RxVoid;
 
 namespace FFmpegPlugin;
 
@@ -37,8 +37,8 @@ public class FFmpegSettingsViewModel : ReactiveObject
         "none"
     ];
 
-    public ReactiveCommand<Unit, Unit> SaveCommand { get; }
-    public ReactiveCommand<Unit, Unit> CancelCommand { get; }
+    public ReactiveCommand<RxVoid, RxVoid> SaveCommand { get; }
+    public ReactiveCommand<RxVoid, RxVoid> CancelCommand { get; }
 
     public event EventHandler? RequestClose;
 
