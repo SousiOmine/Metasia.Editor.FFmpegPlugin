@@ -7,7 +7,7 @@
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <UseLocalMetasiaSource>false</UseLocalMetasiaSource>
-    <MetasiaPackageVersion>0.5.0</MetasiaPackageVersion>
+    <MetasiaPackageVersion>0.6.0</MetasiaPackageVersion>
   </PropertyGroup>
 
   <Import Project="local.props" Condition="Exists('local.props')"/>
